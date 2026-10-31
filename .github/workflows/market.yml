@@ -1,0 +1,119 @@
+name: market-update
+
+on:
+  schedule:
+    # 一天跑 4 次（台灣時間 20:00 / 02:00 / 08:00 / 14:00）
+    # 歷史還沒補完時，每次都會接著補；補完後只抓新的交易日，很快就結束
+    - cron: "0 12 * * *"
+    - cron: "0 18 * * *"
+    - cron: "0 0 * * *"
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "測試用：只處理前 N 檔（0 = 全市場）"
+        default: "0"
+      budget:
+        description: "每個分片最多抓幾分鐘"
+        default: "300"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-data
+  cancel-in-progress: false
+
+env:
+  SHARDS: "4"          # 要和下面 matrix 的分片數量一致
+  LIMIT: ${{ github.event.inputs.limit || '0' }}
+  BUDGET_MIN: ${{ github.event.inputs.budget || '300' }}
+  GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+  GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+  GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 下載 meta、更新股票清單
+        run: python prepare.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meta
+          path: data/meta.db
+          retention-days: 2
+
+  fetch:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: meta
+          path: data
+      - name: 抓資料（分片 ${{ matrix.shard }}）
+        run: python fetch.py ${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: delta-${{ matrix.shard }}
+          path: data/delta_*.db
+          retention-days: 2
+          if-no-files-found: ignore
+
+  merge:
+    needs: [prepare, fetch]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: meta
+          path: data
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # 沒有新資料時不會有 delta
+        with:
+          pattern: delta-*
+          path: data/deltas
+      - name: 合併並上傳到 Google Drive
+        run: python merge.py
+
+      # 公開 repo 若 60 天沒有任何更新，GitHub 會自動停用排程；每月寫入一次避免被停用
+      - name: 保持排程啟用
+        run: |
+          m=$(date -u +%Y-%m)
+          if [ "$(cat .keepalive 2>/dev/null)" != "$m" ]; then
+            echo "$m" > .keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .keepalive
+            git commit -m "keepalive $m"
+            git push
+          fi
