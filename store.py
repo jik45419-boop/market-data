@@ -10,7 +10,13 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 
 def _clean(key):
     """去掉複製時可能夾帶的引號、空白、換行"""
-    return "".join(os.environ[key].split()).strip("\"',")
+    v = "".join(os.environ[key].split()).strip("\"',")
+    if key == "GDRIVE_REFRESH_TOKEN" and not v.startswith("1//"):
+        import re
+        m = re.search(r"1//[0-9A-Za-z_\-]+", v)   # 貼了整段回應時，自動取出 refresh token
+        if m:
+            v = m.group(0)
+    return v
 
 
 class DriveStore:
