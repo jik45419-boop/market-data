@@ -8,6 +8,11 @@ FOLDER_NAME = os.environ.get("DRIVE_FOLDER", "market-data")
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
+def _clean(key):
+    """去掉複製時可能夾帶的引號、空白、換行"""
+    return "".join(os.environ[key].split()).strip("\"',")
+
+
 class DriveStore:
     def __init__(self):
         missing = [k for k in ("GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET",
@@ -19,9 +24,9 @@ class DriveStore:
 
         creds = Credentials(
             None,
-            refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"].strip().strip("\"' ,"),
-            client_id=os.environ["GDRIVE_CLIENT_ID"].strip().strip("\"' ,"),
-            client_secret=os.environ["GDRIVE_CLIENT_SECRET"].strip().strip("\"' ,"),
+            refresh_token=_clean("GDRIVE_REFRESH_TOKEN"),
+            client_id=_clean("GDRIVE_CLIENT_ID"),
+            client_secret=_clean("GDRIVE_CLIENT_SECRET"),
             token_uri="https://oauth2.googleapis.com/token",
             scopes=["https://www.googleapis.com/auth/drive.file"],
         )
