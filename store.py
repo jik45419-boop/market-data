@@ -30,6 +30,16 @@ class DriveStore:
             token_uri="https://oauth2.googleapis.com/token",
             scopes=["https://www.googleapis.com/auth/drive.file"],
         )
+        try:
+            from google.auth.transport.requests import Request
+            creds.refresh(Request())
+        except Exception as e:
+            t, c, k = (_clean(x) for x in ("GDRIVE_REFRESH_TOKEN", "GDRIVE_CLIENT_ID",
+                                          "GDRIVE_CLIENT_SECRET"))
+            diag = (f"refresh_token 長度 {len(t)}、開頭是 1//：{t.startswith('1//')}；"
+                    f"client_id 長度 {len(c)}、結尾正確：{c.endswith('.apps.googleusercontent.com')}；"
+                    f"client_secret 長度 {len(k)}、開頭是 GOCSPX-：{k.startswith('GOCSPX-')}")
+            raise RuntimeError(f"Google 授權失敗（{e}）。檢查：{diag}") from e
         self.d = build("drive", "v3", credentials=creds, cache_discovery=False)
         self.folder = self._folder()
         self.files = self._list()
