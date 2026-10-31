@@ -19,9 +19,9 @@ class DriveStore:
 
         creds = Credentials(
             None,
-            refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"].strip(),
-            client_id=os.environ["GDRIVE_CLIENT_ID"].strip(),
-            client_secret=os.environ["GDRIVE_CLIENT_SECRET"].strip(),
+            refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"].strip().strip("\"' ,"),
+            client_id=os.environ["GDRIVE_CLIENT_ID"].strip().strip("\"' ,"),
+            client_secret=os.environ["GDRIVE_CLIENT_SECRET"].strip().strip("\"' ,"),
             token_uri="https://oauth2.googleapis.com/token",
             scopes=["https://www.googleapis.com/auth/drive.file"],
         )
