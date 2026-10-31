@@ -10,6 +10,10 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 
 class DriveStore:
     def __init__(self):
+        missing = [k for k in ("GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET",
+                               "GDRIVE_REFRESH_TOKEN") if not os.environ.get(k, "").strip()]
+        if missing:
+            raise RuntimeError("GitHub Secrets 尚未設定：" + "、".join(missing))
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 

@@ -195,4 +195,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        notice("執行失敗", f"{type(e).__name__}: {e}", "error")
+        raise
