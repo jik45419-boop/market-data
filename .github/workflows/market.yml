@@ -106,14 +106,20 @@ jobs:
         run: python merge.py
 
       # 公開 repo 若 60 天沒有任何更新，GitHub 會自動停用排程；每月寫入一次避免被停用
+      # 先和 GitHub 上最新版本同步（前一次執行可能已經寫過本月），失敗也不影響數據
       - name: 保持排程啟用
+        continue-on-error: true
         run: |
           m=$(date -u +%Y-%m)
+          git fetch -q origin "${GITHUB_REF_NAME}"
+          git checkout -q -B keepalive "origin/${GITHUB_REF_NAME}"
           if [ "$(cat .keepalive 2>/dev/null)" != "$m" ]; then
             echo "$m" > .keepalive
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add .keepalive
             git commit -m "keepalive $m"
-            git push
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "本月已更新過 .keepalive"
           fi
