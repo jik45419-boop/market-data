@@ -68,8 +68,8 @@ class DriveStore:
         while True:
             res = self.d.files().list(
                 q=f"'{self.folder}' in parents and trashed=false",
-                fields="nextPageToken, files(id,name,size)",
-                pageSize=1000, pageToken=token).execute(num_retries=5)
+                fields="nextPageToken, files(id,name,size)", orderBy="modifiedTime",
+                pageSize=1000, pageToken=token).execute(num_retries=5)   # 同名時以最新的為準
             for f in res.get("files", []):
                 out[f["name"]] = f["id"]
             token = res.get("nextPageToken")
@@ -92,20 +92,64 @@ class DriveStore:
         from googleapiclient.http import MediaFileUpload
         media = MediaFileUpload(str(path), mimetype=mimetype,
                                 resumable=True, chunksize=32 * 1024 * 1024)
-        if name in self.files:
-            self.d.files().update(fileId=self.files[name],
-                                  media_body=media).execute(num_retries=5)
-        else:
-            f = self.d.files().create(
-                body={"name": name, "parents": [self.folder]},
-                media_body=media, fields="id").execute(num_retries=5)
-            self.files[name] = f["id"]
+        # 不覆蓋舊檔：覆蓋會讓 Drive 保留舊版本 30 天並佔用空間。改成先上傳新檔，成功後永久刪除舊檔
+        old = self.files.get(name)
+        f = self.d.files().create(
+            body={"name": name, "parents": [self.folder]},
+            media_body=media, fields="id").execute(num_retries=5)
+        self.files[name] = f["id"]
+        if old:
+            self._purge(old)
+
+    def _purge(self, file_id):
+        try:
+            self.d.files().delete(fileId=file_id).execute(num_retries=5)
+        except Exception as e:   # 刪不掉不影響數據；下次 cleanup 會再清
+            print(f"刪除舊檔失敗（{e}），下次清理時再刪", flush=True)
 
 
     def delete(self, name):
-        """刪除這個程式建立的檔案（移到 Drive 垃圾桶，30 天內可還原）"""
+        """永久刪除這個程式建立的檔案（不進垃圾桶，避免佔用 Drive 空間）"""
         if name in self.files:
-            self.d.files().update(fileId=self.files.pop(name), body={"trashed": True}).execute(num_retries=5)
+            self._purge(self.files.pop(name))
+
+    def cleanup(self):
+        """清掉佔空間的東西：本程式放進垃圾桶的檔案、同名重複的舊檔、檔案的舊版本。回傳摘要"""
+        n_trash = n_dup = n_rev = 0
+        freed = 0
+        token = None
+        while True:
+            res = self.d.files().list(q=f"'{self.folder}' in parents and trashed=true",
+                                      fields="nextPageToken, files(id,size)", pageSize=1000,
+                                      pageToken=token).execute(num_retries=5)
+            for f in res.get("files", []):
+                self._purge(f["id"]); n_trash += 1; freed += int(f.get("size", 0))
+            token = res.get("nextPageToken")
+            if not token:
+                break
+        seen, token = {}, None
+        while True:
+            res = self.d.files().list(q=f"'{self.folder}' in parents and trashed=false",
+                                      fields="nextPageToken, files(id,name,size)", orderBy="modifiedTime desc",
+                                      pageSize=1000, pageToken=token).execute(num_retries=5)
+            for f in res.get("files", []):
+                if f["name"] in seen:           # 較舊的同名檔
+                    self._purge(f["id"]); n_dup += 1; freed += int(f.get("size", 0))
+                    continue
+                seen[f["name"]] = f["id"]
+                revs = self.d.revisions().list(fileId=f["id"], fields="revisions(id,size)").execute(
+                    num_retries=5).get("revisions", [])
+                for r in revs[:-1]:             # 最後一個是目前版本
+                    try:
+                        self.d.revisions().delete(fileId=f["id"], revisionId=r["id"]).execute(num_retries=5)
+                        n_rev += 1; freed += int(r.get("size", 0))
+                    except Exception as e:
+                        print(f"刪除 {f['name']} 舊版本失敗：{e}", flush=True)
+            token = res.get("nextPageToken")
+            if not token:
+                break
+        self.files = self._list()
+        return f"刪除垃圾桶 {n_trash} 個、重複舊檔 {n_dup} 個、舊版本 {n_rev} 個，釋放約 {freed / 1e9:.2f} GB"
 
 
 class LocalStore:
@@ -125,6 +169,9 @@ class LocalStore:
     def upload(self, path, name, mimetype=None):
         shutil.copy(path, self.root / name)
         self.files[name] = self.root / name
+
+    def cleanup(self):
+        return "本地測試：不用清理"
 
     def delete(self, name):
         if (self.root / name).exists():

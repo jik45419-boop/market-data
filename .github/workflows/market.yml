@@ -104,6 +104,10 @@ jobs:
           path: data/deltas
       - name: 合併並上傳到 Google Drive
         run: python merge.py
+      - name: 清理 Drive 空間（舊版本、重複檔）
+        if: always()
+        continue-on-error: true
+        run: python tools/cleanup.py
 
       # 公開 repo 若 60 天沒有任何更新，GitHub 會自動停用排程；每月寫入一次避免被停用
       # 先和 GitHub 上最新版本同步（前一次執行可能已經寫過本月），失敗也不影響數據

@@ -30,6 +30,9 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 重新打包
         run: python tools/repack.py
+      - name: 清理 Drive 空間
+        if: always()
+        run: python tools/cleanup.py
       - name: 數據包大小
         if: always()
         run: python tools/pack_stats.py
