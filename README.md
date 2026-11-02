@@ -14,15 +14,26 @@
 
 ## Drive 上的檔案
 
-每個檔案都是 gzip 壓縮的 SQLite 資料庫（`.db.gz`），解壓後每包 < 200 MB。
+**每年一個 SQLite 資料庫** `astock_YYYY.db`，裡面有三張表：`daily`（股票＋基金＋指數日線）、`m15`（15 分鐘線）、`m60`（60 分鐘線）。
+壓縮後（`.db.gz`）超過 200MiB 就切成 `astock_YYYY.db.gz.part01`、`part02`…，每片 200MiB，**要把同一年的所有片段接起來再解壓**。
 
-| 檔名 | 內容 | 分包 |
-|---|---|---|
-| `daily_stock_2024.db.gz` | 股票日線（表 `daily`） | 每年（約 100～170 MB） |
-| `daily_fund_index_2021_2024.db.gz` | ETF＋指數日線（表 `daily`） | 2015–2020、2021–2024，之後每 2 年 |
-| `m15_2024-03.db.gz` | 15 分鐘線（表 `m15`） | 每月（約 60～115 MB；兩個月合併會超過 200 MB） |
-| `m60_2024H1.db.gz` | 60 分鐘線（表 `m60`） | 每半年（約 120～150 MB） |
-| `meta.db.gz` | 股票清單、行業、交易日曆、指數成分、更新進度 | — |
+| 檔名 | 內容 |
+|---|---|
+| `astock_2015.db.gz` ～ `astock_2019.db.gz` | 只有日線（15 分鐘線從 2020 年起），每年一個檔 |
+| `astock_2025.db.gz.part01`～`part03` | 2025 年：日線、15 分鐘線、60 分鐘線（解壓後約 1.6 GB） |
+| `meta.db.gz` | 股票清單、行業、交易日曆、指數成分、更新進度 |
+| `restore.py` | 還原工具：把片段接起來並解壓 |
+
+### 還原
+把同一年的所有片段和 `restore.py` 下載到同一個資料夾，然後：
+```
+python restore.py            # 還原資料夾裡所有年份 → astock_YYYY.db
+python restore.py 2025       # 只還原 2025 年
+```
+不用程式也可以：Mac／Linux `cat astock_2025.db.gz.part* | gunzip > astock_2025.db`；
+Windows `copy /b astock_2025.db.gz.part01+astock_2025.db.gz.part02+astock_2025.db.gz.part03 astock_2025.db.gz`，再用 7-Zip 解壓。
+
+每天的更新只會改到今年（跨年時加上去年）的檔案，舊年份不會再變動。
 
 ### 日線欄位 `daily`
 `code, date, open, high, low, close, preclose, volume, amount, turn, tradestatus, pct_chg, pe_ttm, pb_mrq, ps_ttm, pcf_ttm, is_st, adj_factor`
@@ -50,16 +61,10 @@
 ## 讀取範例（Python）
 
 ```python
-import gzip, shutil, sqlite3
+import sqlite3
 import pandas as pd
 
-def open_pack(path_gz):
-    path = path_gz[:-3]
-    with gzip.open(path_gz, "rb") as a, open(path, "wb") as b:
-        shutil.copyfileobj(a, b)
-    return sqlite3.connect(path)
-
-conn = open_pack("daily_stock_2024.db.gz")
+conn = sqlite3.connect("astock_2024.db")      # 先用 restore.py 還原
 df = pd.read_sql("SELECT * FROM daily WHERE code='sh.600000'", conn)
 df["close_hfq"] = df["close"] * df["adj_factor"]                       # 後復權
 df["close_qfq"] = df["close"] * df["adj_factor"] / df["adj_factor"].iloc[-1]  # 前復權

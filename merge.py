@@ -11,25 +11,20 @@ import os
 import sqlite3
 import time
 
-from common import (DATA, META, PACK_LIMIT_MB, STOCK, daily_pack, get_state,
-                    gunzip_file, gzip_file, m15_pack, m60_pack, notice, now,
-                    open_db, open_meta, pack_dataset, set_state)
+from common import (DAILY_START, DATA, META, PART_BYTES, STOCK, TABLES, daily_pack, get_state,
+                    gzip_file, m15_pack, m60_pack, notice, now, open_db, open_meta,
+                    pack_get, pack_put, pack_year, set_state)
 from store import get_store
 
 PACKS = DATA / "packs"
+DAILY_START_YEAR = DAILY_START[:4]
 
 
 def daily_filter(name):
-    """數據包名稱 → (種類, 起日, 迄日)"""
-    p = name.split("_")
-    if name.startswith("daily_stock_"):
-        y = int(p[2][:4])
-        if p[2].endswith(("H1", "H2")):          # 舊格式（半年一包），只在重新打包時會遇到
-            h = p[2][-1]
-            return ("stock",), (f"{y}-01-01" if h == "1" else f"{y}-07-01"), (f"{y}-06-30" if h == "1" else f"{y}-12-31")
-        return ("stock",), f"{y}-01-01", f"{y}-12-31"
-    lo = "1990-01-01" if p[3] == "2015" else f"{p[3]}-01-01"
-    return ("etf", "index"), lo, f"{p[4]}-12-31"
+    """數據包名稱 → (種類, 起日, 迄日)：每年一包，股票＋基金＋指數"""
+    y = pack_year(name)
+    lo = "1990-01-01" if f"{y}" == DAILY_START_YEAR else f"{y}-01-01"
+    return ("stock", "etf", "index"), lo, f"{y}-12-31"
 
 
 class Packs:
@@ -42,12 +37,8 @@ class Packs:
         if name in self.local:
             return self.local[name]
         path = PACKS / f"{name}.db"
-        gz = f"{name}.db.gz"
-        if self.store.exists(gz):
-            self.store.download(gz, PACKS / gz)
-            gunzip_file(PACKS / gz, path)
-            os.remove(PACKS / gz)
-        conn = open_db(path, (pack_dataset(name),))
+        pack_get(self.store, name, path)
+        conn = open_db(path, TABLES)
         conn.close()
         self.local[name] = path
         return path
@@ -113,30 +104,32 @@ def merge_delta(packs, delta):
     return stats
 
 
+def pack_info(path):
+    """各表列數、股票數、日期範圍"""
+    conn = sqlite3.connect(str(path))
+    n = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
+    codes, d0, d1 = conn.execute("SELECT COUNT(DISTINCT code), MIN(date), MAX(date) FROM daily").fetchone()
+    conn.close()
+    return n, codes, d0, d1
+
+
 def finalize(store, packs, meta):
-    big = []
     for name, path in sorted(packs.local.items()):
-        ds = pack_dataset(name)
-        key = "date" if ds == "daily" else "dt"
+        n, codes, d0, d1 = pack_info(path)
         conn = sqlite3.connect(str(path))
-        rows, codes, k0, k1 = conn.execute(
-            f"SELECT COUNT(*), COUNT(DISTINCT code), MIN({key}), MAX({key}) FROM {ds}").fetchone()
         conn.execute("VACUUM")
         conn.close()
         size = os.path.getsize(path) / 1e6
         gz = PACKS / f"{name}.db.gz"
         gzip_file(path, gz)
         gz_size = os.path.getsize(gz) / 1e6
-        store.upload(gz, f"{name}.db.gz")
+        parts = pack_put(store, gz, name)
         os.remove(gz)
         meta.execute("INSERT OR REPLACE INTO packs VALUES(?,?,?,?,?,?,?,?,?)",
-                     (name, ds, rows, codes, str(k0), str(k1),
-                      round(size, 1), round(gz_size, 1), now()))
-        print(f"上傳 {name}: {rows} 列，{size:.0f} MB（壓縮後 {gz_size:.0f} MB）", flush=True)
-        if size > PACK_LIMIT_MB:
-            big.append(f"{name} {size:.0f}MB")
-    if big:
-        notice("數據包超過 200MB", "，".join(big), "warning")
+                     (name, f"daily {n['daily']}，m15 {n['m15']}，m60 {n['m60']}；{parts} 個檔",
+                      sum(n.values()), codes, str(d0), str(d1), round(size, 1), round(gz_size, 1), now()))
+        print(f"上傳 {name}: 日線 {n['daily']:,}、15分 {n['m15']:,}、60分 {n['m60']:,} 列；"
+              f"解壓 {size:.0f} MB、壓縮 {gz_size:.0f} MB → {parts} 個檔（每檔 ≤ {PART_BYTES / 2**20:.0f}MiB）", flush=True)
 
 
 def coverage(meta):

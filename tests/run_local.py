@@ -25,7 +25,8 @@ os.environ["SHARDS"] = "4"
 import fetch  # noqa: E402
 import merge  # noqa: E402
 import prepare  # noqa: E402
-from common import DATA, gunzip_file  # noqa: E402
+from common import DATA, gunzip_file, pack_get  # noqa: E402
+from store import LocalStore  # noqa: E402
 
 
 def one_round(label):
@@ -45,9 +46,9 @@ def one_round(label):
 
 
 def open_pack(name):
-    gz = tmp / "drive" / f"{name}.db.gz"
     out = tmp / f"{name}.db"
-    gunzip_file(gz, out)
+    if not out.exists():
+        assert pack_get(LocalStore(tmp / "drive"), name, out), name
     return sqlite3.connect(out)
 
 
@@ -80,19 +81,19 @@ assert ("sh.600000", "daily", "2026-11-03") in prog
 assert ("sh.600000", "m15", "2026-11-03") in prog
 assert not any(p[0] in ("sh.510300", "sh.000300") and p[1] == "m15" for p in prog)
 
-c = open_pack("daily_stock_2026")
+c = open_pack("astock_2026")
 n, f = c.execute("SELECT COUNT(*), MIN(adj_factor) FROM daily WHERE code='sh.600000'").fetchone()
 assert abs(f - 1.5) < 1e-6, f
 dup = c.execute("SELECT COUNT(*) - COUNT(DISTINCT code||date) FROM daily").fetchone()[0]
 assert dup == 0
-c = open_pack("daily_fund_index_2025_2026")
+c = open_pack("astock_2026")
 kinds = c.execute("SELECT code, COUNT(*), MIN(adj_factor), MAX(pe_ttm) FROM daily GROUP BY code").fetchall()
 print("基金/指數包:", kinds)
-assert {k[0] for k in kinds} == {"sh.510300", "sz.159915", "sh.000300"}
+assert {"sh.510300", "sz.159915", "sh.000300"} <= {k[0] for k in kinds}
 
-c = open_pack("m15_2026-11")
+c = open_pack("astock_2026")
 print("m15 2026-11:", c.execute("SELECT code, COUNT(*), MIN(dt), MAX(dt) FROM m15 GROUP BY code").fetchall())
-c = open_pack("m60_2026H2")
+c = open_pack("astock_2026")
 rows = c.execute("SELECT * FROM m60 WHERE code='sh.600000' AND dt/10000=20261103 ORDER BY dt").fetchall()
 print("60分 2026-11-03:", rows)
 p = fake_baostock.price("sh.600000", date(2026, 11, 3))

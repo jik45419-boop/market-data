@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-一次性重新打包（可重複執行）：把 Drive 上舊規則的小數據包合併成新規則的包
-  · 股票日線：半年一包 → 一年一包
-  · 基金＋指數日線：兩年一包 → 2015–2020、2021–2024、之後每 2 年一包
-  · 60 分鐘線：每季一包 → 半年一包
-  · 15 分鐘線：維持每月一包（兩個月合併會超過 200MB）
-每個新包：下載對應的舊包 → 合併 → 核對列數 → 上傳新包 → 更新 meta → 把舊包移到 Drive 垃圾桶
-中途失敗可以直接重跑：已經上傳的新包會被當作來源之一一起合併。
+重新打包成「每年一個資料庫」（可重複執行）
+  astock_YYYY.db：當年的 daily（股票＋基金＋指數）、m15、m60 三張表
+  壓縮後 ≤ 200MiB → astock_YYYY.db.gz；超過 → astock_YYYY.db.gz.part01、part02…（依序接起來再解壓）
+來源可以是任何舊格式（半年／兩年／每季／每月的小包）。
+步驟：逐年 下載來源 → 合併 → 核對每張表列數 → 上傳 → 記錄到 meta；全部年份完成後才把舊包移到 Drive 垃圾桶。
+中途失敗可直接重跑。
 """
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -17,34 +17,37 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import (DATA, META, PACK_LIMIT_MB, STOCK, fund_index_years, gunzip_file,  # noqa: E402
-                    gzip_file, notice, now, open_db, open_meta, pack_dataset)
+from common import (DAILY_START, DATA, META, PART_BYTES, TABLES, gunzip_file, gzip_file,  # noqa: E402
+                    notice, now, open_db, open_meta, pack_get, pack_put)
 from store import get_store  # noqa: E402
 
-PACKS = DATA / "repack"
+WORK = DATA / "repack"
+Y0 = int(DAILY_START[:4])
 
 
-def target(name):
-    """舊（或新）包名 → 新包名"""
-    if name.startswith("daily_stock_"):
-        return f"daily_stock_{name.split('_')[2][:4]}"
-    if name.startswith("daily_fund_index_"):
-        y0 = int(name.split("_")[3])
-        a, b = fund_index_years(y0)
-        return f"daily_fund_index_{a}_{b}"
-    if name.startswith("m60_"):
-        y, part = name[4:8], name[8:]
-        if part.startswith("Q"):
-            return f"m60_{y}H{1 if int(part[1]) <= 2 else 2}"
-        return name
-    return name
+def parse(name):
+    """舊包名 → (表, 涵蓋年份)；不是舊格式回傳 None"""
+    m = re.fullmatch(r"daily_stock_(\d{4})(H[12])?", name)
+    if m:
+        return "daily", [int(m.group(1))]
+    m = re.fullmatch(r"daily_fund_index_(\d{4})_(\d{4})", name)
+    if m:
+        return "daily", list(range(int(m.group(1)), int(m.group(2)) + 1))
+    m = re.fullmatch(r"m15_(\d{4})-\d{2}", name)
+    if m:
+        return "m15", [int(m.group(1))]
+    m = re.fullmatch(r"m60_(\d{4})(Q[1-4]|H[12])", name)
+    if m:
+        return "m60", [int(m.group(1))]
+    return None
 
 
-def fetch_meta(store):
-    DATA.mkdir(parents=True, exist_ok=True)
-    store.download("meta.db.gz", DATA / "meta.db.gz")
-    gunzip_file(DATA / "meta.db.gz", META)
-    os.remove(DATA / "meta.db.gz")
+def year_filter(table, y):
+    """只取這一年的資料（基金＋指數的舊包跨多年）"""
+    if table == "daily":
+        lo = "0000-00-00" if y == Y0 else f"{y}-01-01"
+        return "date BETWEEN ? AND ?", (lo, f"{y}-12-31")
+    return "dt / 100000000 = ?", (y,)
 
 
 def save_meta(store, meta):
@@ -57,73 +60,92 @@ def save_meta(store, meta):
 def main():
     t0 = time.time()
     store = get_store()
-    fetch_meta(store)
+    DATA.mkdir(parents=True, exist_ok=True)
+    WORK.mkdir(parents=True, exist_ok=True)
+    store.download("meta.db.gz", DATA / "meta.db.gz")
+    gunzip_file(DATA / "meta.db.gz", META)
+    os.remove(DATA / "meta.db.gz")
     meta = open_meta()
-    PACKS.mkdir(parents=True, exist_ok=True)
 
-    names = sorted(n[:-6] for n in store.files if n.endswith(".db.gz") and n != "meta.db.gz")
-    groups = defaultdict(list)
-    for n in names:
-        groups[target(n)].append(n)
-    todo = {t: srcs for t, srcs in groups.items() if srcs != [t]}
-    print(f"Drive 上 {len(names)} 個數據包 → 新規則 {len(groups)} 個；需要重新打包 {len(todo)} 個", flush=True)
+    bases = sorted({re.sub(r"\.db\.gz(\.part\d+)?$", "", n) for n in store.files if ".db.gz" in n} - {"meta"})
+    old = {b: parse(b) for b in bases if parse(b)}
+    by_year = defaultdict(list)
+    for b, (t, ys) in old.items():
+        for y in ys:
+            by_year[max(y, Y0)].append((b, t))
+    print(f"Drive 上 {len(bases)} 個數據包，其中舊格式 {len(old)} 個 → 要建立 {len(by_year)} 個年度資料庫", flush=True)
 
-    big, done = [], 0
-    for tgt, srcs in sorted(todo.items()):
-        ds = pack_dataset(tgt)
-        key = "date" if ds == "daily" else "dt"
-        out = PACKS / f"{tgt}.new.db"
+    cache, uses = {}, defaultdict(int)
+    for srcs in by_year.values():
+        for b, _ in srcs:
+            uses[b] += 1
+
+    def local(b):
+        if b not in cache:
+            p = WORK / f"src_{b}.db"
+            pack_get(store, b, p)
+            cache[b] = p
+        return cache[b]
+
+    lines, built = [], 0
+    for y in sorted(by_year):
+        name = f"astock_{y}"
+        out = WORK / f"{name}.db"
         if out.exists():
             out.unlink()
-        conn = open_db(out, (ds,))
-        expect = 0
-        for src in srcs:
-            gz, db = PACKS / f"{src}.db.gz", PACKS / f"{src}.db"
-            store.download(f"{src}.db.gz", gz)
-            gunzip_file(gz, db)
-            os.remove(gz)
-            conn.execute("ATTACH DATABASE ? AS s", (str(db),))
-            n = conn.execute(f"SELECT COUNT(*) FROM s.{ds}").fetchone()[0]
-            expect += n
-            conn.execute(f"INSERT OR REPLACE INTO main.{ds} SELECT * FROM s.{ds}")
+        conn = open_db(out, TABLES)
+        expect = defaultdict(int)
+        for b, t in by_year[y]:
+            conn.execute("ATTACH DATABASE ? AS s", (str(local(b)),))
+            cond, args = year_filter(t, y)
+            expect[t] += conn.execute(f"SELECT COUNT(*) FROM s.{t} WHERE {cond}", args).fetchone()[0]
+            conn.execute(f"INSERT OR REPLACE INTO main.{t} SELECT * FROM s.{t} WHERE {cond}", args)
             conn.commit()
             conn.execute("DETACH DATABASE s")
-            os.remove(db)
-        rows, codes, k0, k1 = conn.execute(
-            f"SELECT COUNT(*), COUNT(DISTINCT code), MIN({key}), MAX({key}) FROM {ds}").fetchone()
-        if rows != expect:
-            raise RuntimeError(f"{tgt}: 合併後 {rows} 列，來源合計 {expect} 列，不一致，停止（舊包都還在）")
+            uses[b] -= 1
+            if uses[b] == 0:
+                os.remove(cache.pop(b))
+        got = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
+        bad = [t for t in TABLES if got[t] != expect.get(t, 0)]
+        if bad:
+            raise RuntimeError(f"{name}: 列數不一致 {got} vs {dict(expect)}，停止（舊包都還在）")
+        codes, d0, d1 = conn.execute("SELECT COUNT(DISTINCT code), MIN(date), MAX(date) FROM daily").fetchone()
         conn.execute("VACUUM")
         conn.close()
         size = os.path.getsize(out) / 1e6
-        gz = PACKS / f"{tgt}.db.gz"
+        gz = WORK / f"{name}.db.gz"
         gzip_file(out, gz)
-        gz_size = os.path.getsize(gz) / 1e6
-        store.upload(gz, f"{tgt}.db.gz")
-        os.remove(gz)
         os.remove(out)
+        gz_size = os.path.getsize(gz) / 1e6
+        parts = pack_put(store, gz, name)
+        os.remove(gz)
         meta.execute("INSERT OR REPLACE INTO packs VALUES(?,?,?,?,?,?,?,?,?)",
-                     (tgt, ds, rows, codes, str(k0), str(k1), round(size, 1), round(gz_size, 1), now()))
-        for src in srcs:
-            if src != tgt:
-                meta.execute("DELETE FROM packs WHERE name=?", (src,))
-        save_meta(store, meta)                      # 先記錄新包，再刪舊包
-        for src in srcs:
-            if src != tgt:
-                store.delete(f"{src}.db.gz")
-        done += 1
-        if size > PACK_LIMIT_MB:
-            big.append(f"{tgt} {size:.0f}MB")
-        print(f"[{done}/{len(todo)}] {tgt} ← {', '.join(srcs)}：{rows:,} 列，{size:.0f} MB（壓縮 {gz_size:.0f} MB）", flush=True)
+                     (name, f"daily {got['daily']}，m15 {got['m15']}，m60 {got['m60']}；{parts} 個檔",
+                      sum(got.values()), codes, str(d0), str(d1), round(size, 1), round(gz_size, 1), now()))
+        save_meta(store, meta)
+        built += 1
+        line = f"{y}: 日線 {got['daily']:,}、15分 {got['m15']:,}、60分 {got['m60']:,} 列｜解壓 {size:.0f}MB、壓縮 {gz_size:.0f}MB → {parts} 個檔"
+        lines.append(line)
+        print(f"[{built}/{len(by_year)}] {name} ← {len(by_year[y])} 個舊包｜{line}", flush=True)
 
-    left = meta.execute("SELECT COUNT(*), SUM(size_mb), MAX(size_mb), SUM(size_gz_mb) FROM packs").fetchone()
-    meta.execute("INSERT INTO runs VALUES(?,?)", (now(), f"重新打包 {done} 個"))
+    # 全部年份都上傳並記錄後，才刪舊包
+    for b in old:
+        meta.execute("DELETE FROM packs WHERE name=?", (b,))
+    meta.execute("INSERT INTO runs VALUES(?,?)", (now(), f"重新打包成年度資料庫 {built} 個"))
     save_meta(store, meta)
+    removed = 0
+    for n in list(store.files):
+        if re.sub(r"\.db\.gz(\.part\d+)?$", "", n) in old:
+            store.delete(n)
+            removed += 1
     meta.close()
-    notice("重新打包", f"完成 {done} 個新包；現在共 {left[0]} 個數據包，解壓後合計 {left[1]:,.0f} MB、"
-                   f"最大 {left[2]:.0f} MB，壓縮後合計 {left[3]:,.0f} MB；用時 {(time.time() - t0) / 60:.0f} 分鐘")
-    if big:
-        notice("數據包超過 200MB", "，".join(big), "warning")
+    # 還原工具放在同一個資料夾，下載後直接用
+    store.upload(Path(__file__).resolve().parent / "restore.py", "restore.py", "text/x-python")
+    n_files = sum(1 for n in store.files if ".db.gz" in n)
+    notice("年度資料庫", f"建立 {built} 個、舊檔移到垃圾桶 {removed} 個；Drive 上現在共 {n_files} 個檔（含 meta）；"
+                     f"每檔 ≤ {PART_BYTES / 2**20:.0f}MiB；用時 {(time.time() - t0) / 60:.0f} 分鐘")
+    if lines:
+        notice("各年份", "；".join(lines))
 
 
 if __name__ == "__main__":

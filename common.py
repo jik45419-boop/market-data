@@ -15,6 +15,9 @@ LIMIT = int(os.environ.get("LIMIT", "0") or 0)   # 測試用：只處理前 N �
 DATA = Path(os.environ.get("DATA_DIR", "data"))
 META = DATA / "meta.db"
 PACK_LIMIT_MB = 200
+# Drive 上每個檔案最多 200MiB：壓縮後超過就切成 .part01、.part02…（測試時可用 PART_MB 改小）
+PART_BYTES = int(float(os.environ.get("PART_MB", "200")) * 1024 * 1024)
+TABLES = ("daily", "m15", "m60")
 
 STOCK, ETF, INDEX = "stock", "etf", "index"
 
@@ -104,39 +107,80 @@ def next_day(d):
 # 日線股票：每半年一包；ETF＋指數：每 2 年一包
 # 15 分鐘線：每月一包；60 分鐘線：每季一包
 
-def fund_index_years(y):
-    """基金＋指數日線分組（每包解壓後約 100～130MB）：2015–2020、2021–2024，之後每 2 年一包"""
-    if y <= 2020:
-        return 2015, 2020
-    if y <= 2024:
-        return 2021, 2024
-    y0 = 2025 + (y - 2025) // 2 * 2
-    return y0, y0 + 1
+def year_pack(y):
+    """每年一個資料庫：當年的股票＋基金＋指數日線、15 分鐘線、60 分鐘線"""
+    return f"astock_{max(int(y), int(DAILY_START[:4]))}"
 
 
 def daily_pack(kind, d):
-    """股票日線一年一包（解壓後約 100～170MB）；基金＋指數見 fund_index_years"""
-    y = int(d[:4])
-    if kind == STOCK:
-        return f"daily_stock_{y}"
-    y0, y1 = fund_index_years(y)
-    return f"daily_fund_index_{y0}_{y1}"
+    return year_pack(d[:4])
 
 
 def m15_pack(ym):
-    """15 分鐘線一個月一包（解壓後約 60～115MB；兩個月合併會超過 200MB）。ym = YYYYMM 整數"""
-    return f"m15_{ym // 100}-{ym % 100:02d}"
+    """ym = YYYYMM 整數"""
+    return year_pack(ym // 100)
 
 
 def m60_pack(ym):
-    """60 分鐘線半年一包（解壓後約 120～150MB）"""
-    return f"m60_{ym // 100}H{1 if ym % 100 <= 6 else 2}"
+    return year_pack(ym // 100)
 
 
-def pack_dataset(name):
-    if name.startswith("daily_"):
-        return "daily"
-    return name[:3]
+def pack_year(name):
+    return int(name.split("_")[1])
+
+
+# ---------------------------------------------------------------- Drive 上的數據包（單檔或分片）
+def pack_files(store, name):
+    """這個數據包在 Drive 上的檔名：[name.db.gz] 或 [name.db.gz.part01, ...]"""
+    parts = sorted(n for n in store.files if n.startswith(f"{name}.db.gz.part"))
+    if parts:
+        return parts
+    return [f"{name}.db.gz"] if f"{name}.db.gz" in store.files else []
+
+
+def pack_get(store, name, db_path):
+    """下載（分片就依序接起來）並解壓到 db_path；Drive 上沒有就回傳 False"""
+    files = pack_files(store, name)
+    if not files:
+        return False
+    gz = Path(str(db_path) + ".gz")
+    with open(gz, "wb") as out:
+        for f in files:
+            tmp = Path(str(db_path) + ".part")
+            store.download(f, tmp)
+            with open(tmp, "rb") as a:
+                shutil.copyfileobj(a, out, 8 * 1024 * 1024)
+            os.remove(tmp)
+    gunzip_file(gz, db_path)
+    os.remove(gz)
+    return True
+
+
+def pack_put(store, gz_path, name):
+    """上傳壓縮檔：不超過 200MiB 就一個檔，超過就切片；刪掉 Drive 上多出來的舊檔。回傳上傳的檔案數"""
+    size = os.path.getsize(gz_path)
+    old = set(pack_files(store, name))
+    new = []
+    if size <= PART_BYTES:
+        store.upload(gz_path, f"{name}.db.gz")
+        new.append(f"{name}.db.gz")
+    else:
+        with open(gz_path, "rb") as a:
+            i = 0
+            while True:
+                chunk = a.read(PART_BYTES)
+                if not chunk:
+                    break
+                i += 1
+                fn = f"{name}.db.gz.part{i:02d}"
+                tmp = Path(str(gz_path) + f".part{i:02d}")
+                tmp.write_bytes(chunk)
+                store.upload(tmp, fn)
+                os.remove(tmp)
+                new.append(fn)
+    for f in old - set(new):
+        store.delete(f)
+    return len(new)
 
 
 def open_db(path, tables=()):

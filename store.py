@@ -88,9 +88,9 @@ class DriveStore:
             while not done:
                 _, done = dl.next_chunk(num_retries=5)
 
-    def upload(self, path, name):
+    def upload(self, path, name, mimetype="application/gzip"):
         from googleapiclient.http import MediaFileUpload
-        media = MediaFileUpload(str(path), mimetype="application/gzip",
+        media = MediaFileUpload(str(path), mimetype=mimetype,
                                 resumable=True, chunksize=32 * 1024 * 1024)
         if name in self.files:
             self.d.files().update(fileId=self.files[name],
@@ -122,7 +122,7 @@ class LocalStore:
     def download(self, name, path):
         shutil.copy(self.root / name, path)
 
-    def upload(self, path, name):
+    def upload(self, path, name, mimetype=None):
         shutil.copy(path, self.root / name)
         self.files[name] = self.root / name
 
