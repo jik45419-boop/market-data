@@ -21,7 +21,7 @@ signal.signal(signal.SIGALRM, _alarm)
 
 def login():
     last = None
-    for i in range(5):
+    for i in range(8):            # BaoStock 偶爾會短暫斷線幾分鐘：最多等約 6 分鐘再放棄
         try:
             signal.alarm(60)
             lg = bs.login()
@@ -32,7 +32,7 @@ def login():
         except Exception as e:
             signal.alarm(0)
             last = repr(e)
-        time.sleep(3 * (i + 1))
+        time.sleep(min(10 * (i + 1), 60))
     raise RuntimeError(f"BaoStock 登入失敗: {last}")
 
 
