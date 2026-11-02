@@ -45,10 +45,15 @@ def one_round(label):
     print(f"===== {label} 完成 =====")
 
 
-def open_pack(name):
+def open_pack(month):
+    """打開涵蓋這個月份（'YYYY-MM'）的數據包"""
+    from packing import existing
+    ym = int(month[:4]) * 100 + int(month[5:7])
+    st = LocalStore(tmp / "drive")
+    name = next(n for lo, hi, n in existing(st) if lo <= ym <= hi)
     out = tmp / f"{name}.db"
     if not out.exists():
-        assert pack_get(LocalStore(tmp / "drive"), name, out), name
+        assert pack_get(st, name, out), name
     return sqlite3.connect(out)
 
 
@@ -71,29 +76,30 @@ gunzip_file(tmp / "drive" / "meta.db.gz", tmp / "meta.db")
 meta = sqlite3.connect(tmp / "meta.db")
 codes = [r[0] for r in meta.execute("SELECT code FROM securities ORDER BY code")]
 print("股票清單:", codes)
-assert "sh.688981" not in codes and "bj.830799" not in codes and "sh.600002" not in codes
+assert "sh.688981" not in codes and "bj.830799" not in codes and "sh.600002" in codes   # 2010 退市，2005 起算後要有
 assert "sh.113001" not in codes
 prog = meta.execute("SELECT * FROM progress ORDER BY code, dataset").fetchall()
 for p in prog:
     print("  進度", p)
 assert ("sh.600001", "daily", "2021-03-15") in prog, "退市股應停在退市日"
+assert ("sh.600002", "daily", "2010-03-15") in prog and ("sh.600002", "daily_old", "2010-03-15") in prog
 assert ("sh.600000", "daily", "2026-11-03") in prog
 assert ("sh.600000", "m15", "2026-11-03") in prog
 assert not any(p[0] in ("sh.510300", "sh.000300") and p[1] == "m15" for p in prog)
 
-c = open_pack("astock_2026")
+c = open_pack("2026-11")
 n, f = c.execute("SELECT COUNT(*), MIN(adj_factor) FROM daily WHERE code='sh.600000'").fetchone()
 assert abs(f - 1.5) < 1e-6, f
 dup = c.execute("SELECT COUNT(*) - COUNT(DISTINCT code||date) FROM daily").fetchone()[0]
 assert dup == 0
-c = open_pack("astock_2026")
+c = open_pack("2026-11")
 kinds = c.execute("SELECT code, COUNT(*), MIN(adj_factor), MAX(pe_ttm) FROM daily GROUP BY code").fetchall()
 print("基金/指數包:", kinds)
 assert {"sh.510300", "sz.159915", "sh.000300"} <= {k[0] for k in kinds}
 
-c = open_pack("astock_2026")
+c = open_pack("2026-11")
 print("m15 2026-11:", c.execute("SELECT code, COUNT(*), MIN(dt), MAX(dt) FROM m15 GROUP BY code").fetchall())
-c = open_pack("astock_2026")
+c = open_pack("2026-11")
 rows = c.execute("SELECT * FROM m60 WHERE code='sh.600000' AND dt/10000=20261103 ORDER BY dt").fetchall()
 print("60分 2026-11-03:", rows)
 p = fake_baostock.price("sh.600000", date(2026, 11, 3))

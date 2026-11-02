@@ -12,33 +12,27 @@ import re
 import sqlite3
 import time
 
-from common import (DAILY_START, DATA, META, PART_BYTES, STOCK, TABLES, daily_pack, get_state,
-                    gzip_file, m15_pack, m60_pack, notice, now, open_db, open_meta,
-                    pack_get, pack_put, pack_year, set_state)
+from common import (BACKFILL_END, DAILY_START, DATA, META, PART_BYTES, STOCK, TABLES, get_state, gzip_file, notice, now,
+                    open_db, open_meta, pack_get, pack_put, set_state)
+from packing import existing, month_bounds, month_estimates, parse, plan
 from store import get_store
 
 PACKS = DATA / "packs"
-DAILY_START_YEAR = DAILY_START[:4]
-
-
-def daily_filter(name):
-    """數據包名稱 → (種類, 起日, 迄日)：每年一包，股票＋基金＋指數"""
-    y = pack_year(name)
-    lo = "1990-01-01" if f"{y}" == DAILY_START_YEAR else f"{y}-01-01"
-    return ("stock", "etf", "index"), lo, f"{y}-12-31"
 
 
 class Packs:
-    def __init__(self, store):
+    def __init__(self, store, renames=None):
         self.store = store
         self.local = {}
+        self.renames = renames or {}     # {新包名: 舊包名}：最新的包加入新月份後改名
         PACKS.mkdir(parents=True, exist_ok=True)
 
     def path(self, name):
         if name in self.local:
             return self.local[name]
         path = PACKS / f"{name}.db"
-        pack_get(self.store, name, path)
+        if not pack_get(self.store, name, path) and name in self.renames:
+            pack_get(self.store, self.renames[name], path)
         conn = open_db(path, TABLES)
         conn.close()
         self.local[name] = path
@@ -49,59 +43,63 @@ class Packs:
         conn.execute("PRAGMA journal_mode=OFF")
         conn.execute("ATTACH DATABASE ? AS d", (str(delta),))
         conn.execute("ATTACH DATABASE ? AS m", (str(META),))
+        have = {r[0] for r in conn.execute("SELECT name FROM d.sqlite_master WHERE type='table'")}
         n = 0
         for sql, args in sql_list:
+            if ("FROM d.daily" in sql and "daily" not in have) or ("FROM d.m15" in sql and "m15" not in have):
+                continue
             n += conn.execute(sql, args).rowcount or 0
         conn.commit()
         conn.close()
         return n
 
 
-def merge_delta(packs, delta):
+def delta_months(delta):
     src = sqlite3.connect(str(delta))
-    src.execute("ATTACH DATABASE ? AS m", (str(META),))
     tables = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    daily_groups = src.execute(
-        "SELECT DISTINCT s.kind, substr(x.date,1,10) FROM daily x "
-        "JOIN m.securities s ON s.code=x.code") if "daily" in tables else []
-    names = sorted({daily_pack(k, d) for k, d in daily_groups})
-    months = [r[0] for r in src.execute("SELECT DISTINCT dt/1000000 FROM m15")] \
-        if "m15" in tables else []
+    out = set()
+    if "daily" in tables:
+        out |= {int(r[0][:4]) * 100 + int(r[0][5:7]) for r in src.execute("SELECT DISTINCT substr(date,1,7) FROM daily")}
+    if "m15" in tables:
+        out |= {r[0] for r in src.execute("SELECT DISTINCT dt/1000000 FROM m15")}
     src.close()
+    return out
 
+
+M60_SQL = [
+    ("DROP TABLE IF EXISTS temp.b", None),
+    ("""CREATE TEMP TABLE b AS
+        SELECT code, dt, open, high, low, close, volume, amount,
+          (dt / 10000) * 10000 + CASE
+            WHEN dt % 10000 <= 1030 THEN 1030
+            WHEN dt % 10000 <= 1130 THEN 1130
+            WHEN dt % 10000 <= 1400 THEN 1400
+            ELSE 1500 END AS g
+        FROM d.m15 WHERE dt BETWEEN ? AND ?""", "range"),
+    ("""INSERT OR REPLACE INTO m60
+        SELECT a.code, a.g, f.open, a.high, a.low, l.close, a.volume, a.amount
+        FROM (SELECT code, g, max(high) AS high, min(low) AS low,
+                     sum(volume) AS volume, sum(amount) AS amount
+              FROM b GROUP BY code, g) a
+        JOIN (SELECT code, g, min(dt), open FROM b GROUP BY code, g) f
+          ON f.code = a.code AND f.g = a.g
+        JOIN (SELECT code, g, max(dt), close FROM b GROUP BY code, g) l
+          ON l.code = a.code AND l.g = a.g""", None),
+]
+
+
+def merge_delta(packs, delta, names, first):
+    """把 delta 寫進各個包（每個包只收自己月份範圍內的資料）；first = 最早的包（收進更早的零星日線）"""
     stats = {"daily": 0, "m15": 0, "m60": 0}
-    for name in names:
-        kinds, lo, hi = daily_filter(name)
-        q = ("INSERT OR REPLACE INTO daily SELECT x.* FROM d.daily x "
-             "JOIN m.securities s ON s.code=x.code "
-             f"WHERE s.kind IN ({','.join('?' * len(kinds))}) AND x.date BETWEEN ? AND ?")
-        stats["daily"] += packs.run(name, delta, [(q, (*kinds, lo, hi))])
-
-    for ym in sorted(months):
-        lo, hi = ym * 1000000, ym * 1000000 + 999999
-        stats["m15"] += packs.run(m15_pack(ym), delta, [(
-            "INSERT OR REPLACE INTO m15 SELECT * FROM d.m15 WHERE dt BETWEEN ? AND ?",
-            (lo, hi))])
-        stats["m60"] += packs.run(m60_pack(ym), delta, [
-            ("DROP TABLE IF EXISTS temp.b", ()),
-            ("""CREATE TEMP TABLE b AS
-                SELECT code, dt, open, high, low, close, volume, amount,
-                  (dt / 10000) * 10000 + CASE
-                    WHEN dt % 10000 <= 1030 THEN 1030
-                    WHEN dt % 10000 <= 1130 THEN 1130
-                    WHEN dt % 10000 <= 1400 THEN 1400
-                    ELSE 1500 END AS g
-                FROM d.m15 WHERE dt BETWEEN ? AND ?""", (lo, hi)),
-            ("""INSERT OR REPLACE INTO m60
-                SELECT a.code, a.g, f.open, a.high, a.low, l.close, a.volume, a.amount
-                FROM (SELECT code, g, max(high) AS high, min(low) AS low,
-                             sum(volume) AS volume, sum(amount) AS amount
-                      FROM b GROUP BY code, g) a
-                JOIN (SELECT code, g, min(dt), open FROM b GROUP BY code, g) f
-                  ON f.code = a.code AND f.g = a.g
-                JOIN (SELECT code, g, max(dt), close FROM b GROUP BY code, g) l
-                  ON l.code = a.code AND l.g = a.g""", ()),
-        ])
+    for name in sorted(names):
+        lo, hi = parse(name)
+        d0, d1, t0, t1 = month_bounds(lo, hi, first=(name == first))
+        n = packs.run(name, delta, [
+            ("INSERT OR REPLACE INTO daily SELECT * FROM d.daily WHERE date BETWEEN ? AND ?", (d0, d1))])
+        stats["daily"] += n
+        stats["m15"] += packs.run(name, delta, [
+            ("INSERT OR REPLACE INTO m15 SELECT * FROM d.m15 WHERE dt BETWEEN ? AND ?", (t0, t1))])
+        stats["m60"] += packs.run(name, delta, [(q, (t0, t1) if a else ()) for q, a in M60_SQL])
     return stats
 
 
@@ -129,6 +127,12 @@ def finalize(store, packs, meta):
         meta.execute("INSERT OR REPLACE INTO packs VALUES(?,?,?,?,?,?,?,?,?)",
                      (name, f"daily {n['daily']}，m15 {n['m15']}，m60 {n['m60']}；{parts} 個檔",
                       sum(n.values()), codes, str(d0), str(d1), round(size, 1), round(gz_size, 1), now()))
+        old = packs.renames.get(name)
+        if old:                       # 最新的包改名了：新名字上傳成功後才刪舊的
+            for f in [x for x in store.files if x.startswith(f"{old}.db.gz")]:
+                store.delete(f)
+            meta.execute("DELETE FROM packs WHERE name=?", (old,))
+            print(f"{old} → {name}", flush=True)
         print(f"上傳 {name}: 日線 {n['daily']:,}、15分 {n['m15']:,}、60分 {n['m60']:,} 列；"
               f"解壓 {size:.0f} MB、壓縮 {gz_size:.0f} MB → {parts} 個檔（每檔 ≤ {PART_BYTES / 2**20:.0f}MiB）", flush=True)
 
@@ -146,27 +150,44 @@ def coverage(meta):
              ON p.code = s.code AND p.dataset = 'm15'
            WHERE s.kind = ? AND COALESCE(s.out_date, '9999') >= '2020-01-01'""",
         (md, md, STOCK)).fetchone()
+    o_total, o_done = meta.execute(
+        """SELECT COUNT(*), SUM(p.code IS NOT NULL) FROM securities s LEFT JOIN progress p
+             ON p.code = s.code AND p.dataset = 'daily_old'
+           WHERE COALESCE(s.ipo_date, '0000') <= ? AND COALESCE(s.out_date, '9999') >= ?""",
+        (BACKFILL_END, DAILY_START)).fetchone()
     return (f"日線 {d_done or 0}/{d_total} 檔已到 {dd}；"
-            f"15分鐘線 {m_done or 0}/{m_total} 檔已到 {md}")
+            f"15分鐘線 {m_done or 0}/{m_total} 檔已到 {md}；"
+            f"2005–2014 回補 {o_done or 0}/{o_total} 檔")
 
 
 def main():
     t0 = time.time()
     store = get_store()
-    old = [n for n in store.files if re.match(r"(daily_stock|daily_fund_index|m15|m60)_", n)]
+    old = [n for n in store.files if re.match(r"(daily_stock|daily_fund_index|m15|m60)_|astock_\d{4}\.db", n)]
     if old:   # 舊格式還沒轉完：這次不合併（進度不更新，下次會重抓），避免新舊格式混在一起
         notice("略過合併", f"Drive 上還有 {len(old)} 個舊格式數據包，等重新打包（repack）完成後再合併", "warning")
         return
-    packs = Packs(store)
     deltas = sorted(glob.glob(str(DATA / "deltas" / "**" / "delta_*.db"), recursive=True))
+    meta = open_meta()
+    months = set()
+    for delta in deltas:
+        months |= delta_months(delta)
+    ranges = existing(store)
+    sizes = {n: (gz or 0) * 1e6 for n, gz in meta.execute("SELECT name, size_gz_mb FROM packs")}
+    mapping, renames = plan(ranges, months, month_estimates(meta), sizes)
+    names = sorted(set(mapping.values()))
+    all_lo = [parse(n)[0] for n in names] + [lo for lo, _, _ in ranges]
+    first = min(names + [n for _, _, n in ranges], key=lambda n: parse(n)[0]) if all_lo else None
+    if renames:
+        print("最新的包加入新月份：" + "，".join(f"{o} → {n}" for n, o in renames.items()), flush=True)
+    packs = Packs(store, renames)
     total = {"daily": 0, "m15": 0, "m60": 0}
     for delta in deltas:
-        s = merge_delta(packs, delta)
+        s = merge_delta(packs, delta, names, first)
         for k in total:
             total[k] += s[k]
         print(f"合併 {os.path.basename(delta)}: {s}", flush=True)
 
-    meta = open_meta()
     finalize(store, packs, meta)
 
     # 數據包都上傳成功後，才記錄進度

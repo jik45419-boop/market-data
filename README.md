@@ -6,34 +6,27 @@
 
 | 類別 | 內容 | 起始 |
 |---|---|---|
-| 股票 | 滬深主板＋創業板（**剔除科創板 688/689、北交所**），含 2015 年後退市的股票 | 日線 2015-01-01 |
-| ETF | 全部 ETF（只有日線） | 2015-01-01 |
-| 指數 | BaoStock 提供的指數（只有日線） | 2015-01-01 |
+| 股票 | 滬深主板＋創業板（**剔除科創板 688/689、北交所**），含 2005 年後退市的股票 | 日線 2005-01-01 |
+| ETF | 全部 ETF（只有日線） | 2005-01-01 |
+| 指數 | BaoStock 提供的指數（只有日線） | 2005-01-01 |
 | 15 分鐘線 | 股票，不復權 | 2020-01-01（BaoStock 上限） |
 | 60 分鐘線 | 由 15 分鐘線合成，不復權 | 2020-01-01 |
 
 ## Drive 上的檔案
 
-**每年一個 SQLite 資料庫** `astock_YYYY.db`，裡面有三張表：`daily`（股票＋基金＋指數日線）、`m15`（15 分鐘線）、`m60`（60 分鐘線）。
-壓縮後（`.db.gz`）超過 200MiB 就切成 `astock_YYYY.db.gz.part01`、`part02`…，每片 200MiB，**要把同一年的所有片段接起來再解壓**。
+每個數據包是一個 gzip 壓縮的 SQLite 資料庫，涵蓋**連續幾個月**，Drive 上的檔案約 **190MB**（解壓後約 600MB），
+檔名就是起訖月份：`astock_2025-01_2025-04.db.gz` = 2025 年 1 月～4 月。每個包裡有三張表：
+`daily`（股票＋基金＋指數日線）、`m15`（15 分鐘線）、`m60`（60 分鐘線）。
 
-| 檔名 | 內容 |
-|---|---|
-| `astock_2015.db.gz` ～ `astock_2019.db.gz` | 只有日線（15 分鐘線從 2020 年起），每年一個檔 |
-| `astock_2025.db.gz.part01`～`part03` | 2025 年：日線、15 分鐘線、60 分鐘線（解壓後約 1.6 GB） |
-| `meta.db.gz` | 股票清單、行業、交易日曆、指數成分、更新進度 |
-| `restore.py` | 還原工具：把片段接起來並解壓 |
+| 期間 | 內容 | 每包大約涵蓋 |
+|---|---|---|
+| 2005～2019 | 只有日線 | 1～3 年 |
+| 2020 起 | 日線＋15 分鐘＋60 分鐘 | 約 4 個月 |
 
-### 還原
-把同一年的所有片段和 `restore.py` 下載到同一個資料夾，然後：
-```
-python restore.py            # 還原資料夾裡所有年份 → astock_YYYY.db
-python restore.py 2025       # 只還原 2025 年
-```
-不用程式也可以：Mac／Linux `cat astock_2025.db.gz.part* | gunzip > astock_2025.db`；
-Windows `copy /b astock_2025.db.gz.part01+astock_2025.db.gz.part02+astock_2025.db.gz.part03 astock_2025.db.gz`，再用 7-Zip 解壓。
-
-每天的更新只會改到今年（跨年時加上去年）的檔案，舊年份不會再變動。
+- 已經結束的包不會再變動；最新的包每天加入新資料，到約 190MB 就開新包（最新包的檔名迄月會跟著改）。
+- `meta.db.gz`：股票清單、行業、交易日曆、指數成分、更新進度。
+- `restore.py`：解壓工具（`python restore.py` 把資料夾裡的 `.db.gz` 全部解壓成 `.db`）。
+  也可以直接用 7-Zip（Windows）或 `gunzip`（Mac／Linux）解壓。
 
 ### 日線欄位 `daily`
 `code, date, open, high, low, close, preclose, volume, amount, turn, tradestatus, pct_chg, pe_ttm, pb_mrq, ps_ttm, pcf_ttm, is_st, adj_factor`
@@ -64,7 +57,7 @@ Windows `copy /b astock_2025.db.gz.part01+astock_2025.db.gz.part02+astock_2025.d
 import sqlite3
 import pandas as pd
 
-conn = sqlite3.connect("astock_2024.db")      # 先用 restore.py 還原
+conn = sqlite3.connect("astock_2024-01_2024-04.db")      # 先解壓
 df = pd.read_sql("SELECT * FROM daily WHERE code='sh.600000'", conn)
 df["close_hfq"] = df["close"] * df["adj_factor"]                       # 後復權
 df["close_qfq"] = df["close"] * df["adj_factor"] / df["adj_factor"].iloc[-1]  # 前復權

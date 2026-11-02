@@ -8,7 +8,8 @@ import zlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-DAILY_START = "2015-01-01"      # 日線起點
+DAILY_START = "2005-01-01"      # 日線起點（2026-11 起由 2015 往前延伸到 2005）
+BACKFILL_END = "2014-12-31"     # 2015 年以前的日線屬於「回補」，進度另外記錄為 daily_old
 M15_START = "2020-01-01"        # 15 分鐘線起點（BaoStock 最早只到 2020）
 SHARDS = int(os.environ.get("SHARDS", "4"))
 LIMIT = int(os.environ.get("LIMIT", "0") or 0)   # 測試用：只處理前 N 檔
@@ -106,28 +107,6 @@ def next_day(d):
 # ---------------- 分包規則（每包解壓後 < 200 MB） ----------------
 # 日線股票：每半年一包；ETF＋指數：每 2 年一包
 # 15 分鐘線：每月一包；60 分鐘線：每季一包
-
-def year_pack(y):
-    """每年一個資料庫：當年的股票＋基金＋指數日線、15 分鐘線、60 分鐘線"""
-    return f"astock_{max(int(y), int(DAILY_START[:4]))}"
-
-
-def daily_pack(kind, d):
-    return year_pack(d[:4])
-
-
-def m15_pack(ym):
-    """ym = YYYYMM 整數"""
-    return year_pack(ym // 100)
-
-
-def m60_pack(ym):
-    return year_pack(ym // 100)
-
-
-def pack_year(name):
-    return int(name.split("_")[1])
-
 
 # ---------------------------------------------------------------- Drive 上的數據包（單檔或分片）
 def pack_files(store, name):

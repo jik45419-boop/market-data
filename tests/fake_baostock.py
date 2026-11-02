@@ -53,7 +53,7 @@ BASIC = [
 
 
 def trading_days(start, end):
-    d = max(date.fromisoformat(start), date(2015, 1, 1))
+    d = max(date.fromisoformat(start), date(2005, 1, 1))
     e = min(date.fromisoformat(end), TODAY)
     while d <= e:
         if d.weekday() < 5:

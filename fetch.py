@@ -14,7 +14,7 @@ import time
 from datetime import date
 
 import bsapi
-from common import (DAILY_START, DATA, LIMIT, M15_START, SHARDS, STOCK,
+from common import (BACKFILL_END, DAILY_START, DATA, LIMIT, M15_START, SHARDS, STOCK,
                     get_state, next_day, notice, open_db, open_meta, shard_of)
 
 BUDGET_SEC = float(os.environ.get("BUDGET_MIN", "300")) * 60
@@ -32,7 +32,7 @@ def build_tasks(meta, shard):
         secs = secs[:LIMIT]
     prog = {(c, ds): d for c, ds, d in meta.execute("SELECT * FROM progress")}
 
-    daily, minute = [], []
+    daily, old, minute = [], [], []
     for code, kind, ipo, out in secs:
         if shard_of(code) != shard:
             continue
@@ -43,6 +43,12 @@ def build_tasks(meta, shard):
         end = min(dd, out) if out else dd
         if start <= end:
             daily.append(("daily", code, kind, start, end))
+        # 回補 2005–2014：已經有 2015 之後日線、但上市日早於 2015 的標的
+        if (code, "daily") in prog and (code, "daily_old") not in prog and (ipo or DAILY_START) <= BACKFILL_END:
+            s0 = max(DAILY_START, ipo or DAILY_START)
+            e0 = min(BACKFILL_END, out) if out else BACKFILL_END
+            if s0 <= e0:
+                old.append(("daily_old", code, kind, s0, e0))
         # 15 分鐘線（只有股票）
         if kind != STOCK:
             continue
@@ -59,7 +65,7 @@ def build_tasks(meta, shard):
             start = max(start, f"{y}-01-01")
     # 分鐘線依「年份→代碼」排序：所有分片同時補同一年，合併時只動到少數幾個包
     minute.sort(key=lambda t: (t[3][:4], t[1]))
-    return daily + minute
+    return daily + old + minute
 
 
 def main():
@@ -69,7 +75,9 @@ def main():
     tasks = build_tasks(meta, shard)
     meta.close()
     n_daily = sum(1 for t in tasks if t[0] == "daily")
-    notice(f"分片{shard} 待辦", f"日線 {n_daily} 項，15分鐘線 {len(tasks) - n_daily} 項")
+    n_old = sum(1 for t in tasks if t[0] == "daily_old")
+    notice(f"分片{shard} 待辦", f"日線 {n_daily} 項" + (f"，回補 2005–2014 日線 {n_old} 項" if n_old else "")
+           + f"，15分鐘線 {len(tasks) - n_daily - n_old} 項")
     if not tasks:
         return
 
@@ -83,7 +91,7 @@ def main():
                 stopped = "時間用完"
                 break
             try:
-                if ds == "daily":
+                if ds in ("daily", "daily_old"):
                     rows = bsapi.daily(code, kind, start, end)
                     delta.executemany(
                         f"INSERT OR REPLACE INTO daily VALUES({','.join('?' * 18)})", rows)
@@ -95,6 +103,9 @@ def main():
                     rows_m += len(rows)
                 delta.execute("INSERT OR REPLACE INTO progress VALUES(?,?,?)",
                               (code, ds, end))
+                if ds == "daily" and start <= BACKFILL_END:   # 新加入的標的從 2005 起抓，也算完成回補
+                    delta.execute("INSERT OR REPLACE INTO progress VALUES(?,?,?)",
+                                  (code, "daily_old", min(end, BACKFILL_END)))
                 delta.commit()
                 done += 1
                 streak = 0
