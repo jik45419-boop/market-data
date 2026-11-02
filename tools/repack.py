@@ -88,8 +88,16 @@ def main():
         return cache[b]
 
     lines, built = [], 0
+    finished = {r[0] for r in meta.execute("SELECT name FROM packs WHERE name LIKE 'astock_%'")}
     for y in sorted(by_year):
         name = f"astock_{y}"
+        if name in finished and name in {re.sub(r"\.db\.gz(\.part\d+)?$", "", n) for n in store.files}:
+            print(f"{name} 上次已完成，略過", flush=True)
+            for b, _ in by_year[y]:
+                uses[b] -= 1
+                if uses[b] == 0 and b in cache:
+                    os.remove(cache.pop(b))
+            continue
         out = WORK / f"{name}.db"
         if out.exists():
             out.unlink()
@@ -124,9 +132,11 @@ def main():
                       sum(got.values()), codes, str(d0), str(d1), round(size, 1), round(gz_size, 1), now()))
         save_meta(store, meta)
         built += 1
+        if os.environ.get("TEST_FAIL_AFTER") and built >= int(os.environ["TEST_FAIL_AFTER"]):
+            raise RuntimeError("測試：模擬中途失敗")
         line = f"{y}: 日線 {got['daily']:,}、15分 {got['m15']:,}、60分 {got['m60']:,} 列｜解壓 {size:.0f}MB、壓縮 {gz_size:.0f}MB → {parts} 個檔"
         lines.append(line)
-        print(f"[{built}/{len(by_year)}] {name} ← {len(by_year[y])} 個舊包｜{line}", flush=True)
+        print(f"[{built}/{len(by_year)}] {name} ← {len(by_year[y])} 個舊包｜{line}｜磁碟剩 {__import__('shutil').disk_usage(str(DATA)).free / 1e9:.1f} GB", flush=True)
 
     # 全部年份都上傳並記錄後，才刪舊包
     for b in old:
@@ -149,4 +159,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import shutil
+        import traceback
+        tb = " | ".join(x.strip() for x in traceback.format_exc().strip().splitlines()[-6:])
+        du = shutil.disk_usage(str(DATA))
+        print(f"::error title=重新打包失敗::{type(e).__name__}: {e} | {tb} | 磁碟剩 {du.free / 1e9:.1f} GB", flush=True)
+        raise

@@ -8,6 +8,7 @@
 """
 import glob
 import os
+import re
 import sqlite3
 import time
 
@@ -152,6 +153,10 @@ def coverage(meta):
 def main():
     t0 = time.time()
     store = get_store()
+    old = [n for n in store.files if re.match(r"(daily_stock|daily_fund_index|m15|m60)_", n)]
+    if old:   # 舊格式還沒轉完：這次不合併（進度不更新，下次會重抓），避免新舊格式混在一起
+        notice("略過合併", f"Drive 上還有 {len(old)} 個舊格式數據包，等重新打包（repack）完成後再合併", "warning")
+        return
     packs = Packs(store)
     deltas = sorted(glob.glob(str(DATA / "deltas" / "**" / "delta_*.db"), recursive=True))
     total = {"daily": 0, "m15": 0, "m60": 0}
