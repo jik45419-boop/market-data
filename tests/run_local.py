@@ -80,7 +80,7 @@ assert ("sh.600000", "daily", "2026-11-03") in prog
 assert ("sh.600000", "m15", "2026-11-03") in prog
 assert not any(p[0] in ("sh.510300", "sh.000300") and p[1] == "m15" for p in prog)
 
-c = open_pack("daily_stock_2026H2")
+c = open_pack("daily_stock_2026")
 n, f = c.execute("SELECT COUNT(*), MIN(adj_factor) FROM daily WHERE code='sh.600000'").fetchone()
 assert abs(f - 1.5) < 1e-6, f
 dup = c.execute("SELECT COUNT(*) - COUNT(DISTINCT code||date) FROM daily").fetchone()[0]
@@ -92,7 +92,7 @@ assert {k[0] for k in kinds} == {"sh.510300", "sz.159915", "sh.000300"}
 
 c = open_pack("m15_2026-11")
 print("m15 2026-11:", c.execute("SELECT code, COUNT(*), MIN(dt), MAX(dt) FROM m15 GROUP BY code").fetchall())
-c = open_pack("m60_2026Q4")
+c = open_pack("m60_2026H2")
 rows = c.execute("SELECT * FROM m60 WHERE code='sh.600000' AND dt/10000=20261103 ORDER BY dt").fetchall()
 print("60分 2026-11-03:", rows)
 p = fake_baostock.price("sh.600000", date(2026, 11, 3))

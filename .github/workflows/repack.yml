@@ -1,0 +1,35 @@
+name: repack
+
+# 一次性：把舊規則的小數據包合併成新規則（股票日線每年、60 分鐘線每半年…），可重複執行
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 和每日更新共用同一組，避免同時改 Drive 上的數據包
+concurrency:
+  group: market-data
+  cancel-in-progress: false
+
+env:
+  GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+  GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+  GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: 重新打包
+        run: python tools/repack.py
+      - name: 數據包大小
+        if: always()
+        run: python tools/pack_stats.py

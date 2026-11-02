@@ -104,21 +104,33 @@ def next_day(d):
 # 日線股票：每半年一包；ETF＋指數：每 2 年一包
 # 15 分鐘線：每月一包；60 分鐘線：每季一包
 
+def fund_index_years(y):
+    """基金＋指數日線分組（每包解壓後約 100～130MB）：2015–2020、2021–2024，之後每 2 年一包"""
+    if y <= 2020:
+        return 2015, 2020
+    if y <= 2024:
+        return 2021, 2024
+    y0 = 2025 + (y - 2025) // 2 * 2
+    return y0, y0 + 1
+
+
 def daily_pack(kind, d):
+    """股票日線一年一包（解壓後約 100～170MB）；基金＋指數見 fund_index_years"""
     y = int(d[:4])
     if kind == STOCK:
-        return f"daily_stock_{y}H{1 if int(d[5:7]) <= 6 else 2}"
-    y0 = y - (y - 2015) % 2
-    return f"daily_fund_index_{y0}_{y0 + 1}"
+        return f"daily_stock_{y}"
+    y0, y1 = fund_index_years(y)
+    return f"daily_fund_index_{y0}_{y1}"
 
 
 def m15_pack(ym):
-    """ym = YYYYMM 整數"""
+    """15 分鐘線一個月一包（解壓後約 60～115MB；兩個月合併會超過 200MB）。ym = YYYYMM 整數"""
     return f"m15_{ym // 100}-{ym % 100:02d}"
 
 
 def m60_pack(ym):
-    return f"m60_{ym // 100}Q{(ym % 100 - 1) // 3 + 1}"
+    """60 分鐘線半年一包（解壓後約 120～150MB）"""
+    return f"m60_{ym // 100}H{1 if ym % 100 <= 6 else 2}"
 
 
 def pack_dataset(name):

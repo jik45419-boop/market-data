@@ -23,11 +23,13 @@ def daily_filter(name):
     """數據包名稱 → (種類, 起日, 迄日)"""
     p = name.split("_")
     if name.startswith("daily_stock_"):
-        y, h = int(p[2][:4]), p[2][-1]
-        if h == "1":
-            return ("stock",), f"{y}-01-01", f"{y}-06-30"
-        return ("stock",), f"{y}-07-01", f"{y}-12-31"
-    return ("etf", "index"), f"{p[3]}-01-01", f"{p[4]}-12-31"
+        y = int(p[2][:4])
+        if p[2].endswith(("H1", "H2")):          # 舊格式（半年一包），只在重新打包時會遇到
+            h = p[2][-1]
+            return ("stock",), (f"{y}-01-01" if h == "1" else f"{y}-07-01"), (f"{y}-06-30" if h == "1" else f"{y}-12-31")
+        return ("stock",), f"{y}-01-01", f"{y}-12-31"
+    lo = "1990-01-01" if p[3] == "2015" else f"{p[3]}-01-01"
+    return ("etf", "index"), lo, f"{p[4]}-12-31"
 
 
 class Packs:

@@ -18,10 +18,10 @@
 
 | 檔名 | 內容 | 分包 |
 |---|---|---|
-| `daily_stock_2024H1.db.gz` | 股票日線（表 `daily`） | 每半年 |
-| `daily_fund_index_2023_2024.db.gz` | ETF＋指數日線（表 `daily`） | 每 2 年 |
-| `m15_2024-03.db.gz` | 15 分鐘線（表 `m15`） | 每月 |
-| `m60_2024Q1.db.gz` | 60 分鐘線（表 `m60`） | 每季 |
+| `daily_stock_2024.db.gz` | 股票日線（表 `daily`） | 每年（約 100～170 MB） |
+| `daily_fund_index_2021_2024.db.gz` | ETF＋指數日線（表 `daily`） | 2015–2020、2021–2024，之後每 2 年 |
+| `m15_2024-03.db.gz` | 15 分鐘線（表 `m15`） | 每月（約 60～115 MB；兩個月合併會超過 200 MB） |
+| `m60_2024H1.db.gz` | 60 分鐘線（表 `m60`） | 每半年（約 120～150 MB） |
 | `meta.db.gz` | 股票清單、行業、交易日曆、指數成分、更新進度 | — |
 
 ### 日線欄位 `daily`
@@ -59,7 +59,7 @@ def open_pack(path_gz):
         shutil.copyfileobj(a, b)
     return sqlite3.connect(path)
 
-conn = open_pack("daily_stock_2024H1.db.gz")
+conn = open_pack("daily_stock_2024.db.gz")
 df = pd.read_sql("SELECT * FROM daily WHERE code='sh.600000'", conn)
 df["close_hfq"] = df["close"] * df["adj_factor"]                       # 後復權
 df["close_qfq"] = df["close"] * df["adj_factor"] / df["adj_factor"].iloc[-1]  # 前復權

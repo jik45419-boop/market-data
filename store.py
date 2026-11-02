@@ -102,6 +102,12 @@ class DriveStore:
             self.files[name] = f["id"]
 
 
+    def delete(self, name):
+        """刪除這個程式建立的檔案（移到 Drive 垃圾桶，30 天內可還原）"""
+        if name in self.files:
+            self.d.files().update(fileId=self.files.pop(name), body={"trashed": True}).execute(num_retries=5)
+
+
 class LocalStore:
     """本地測試用：把一個資料夾當作 Drive"""
 
@@ -119,6 +125,11 @@ class LocalStore:
     def upload(self, path, name):
         shutil.copy(path, self.root / name)
         self.files[name] = self.root / name
+
+    def delete(self, name):
+        if (self.root / name).exists():
+            (self.root / name).unlink()
+        self.files.pop(name, None)
 
 
 def get_store():
