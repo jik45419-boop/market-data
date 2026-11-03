@@ -48,7 +48,7 @@ class Packs:
         for sql, args in sql_list:
             if ("FROM d.daily" in sql and "daily" not in have) or ("FROM d.m15" in sql and "m15" not in have):
                 continue
-            n += conn.execute(sql, args).rowcount or 0
+            n += max(conn.execute(sql, args).rowcount or 0, 0)   # CREATE/DROP 會回傳 -1
         conn.commit()
         conn.close()
         return n
