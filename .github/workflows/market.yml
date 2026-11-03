@@ -38,15 +38,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
       - name: 下載 meta、更新股票清單
         run: python prepare.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: meta
           path: data/meta.db
@@ -61,19 +61,19 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: meta
           path: data
       - name: 抓資料（分片 ${{ matrix.shard }}）
         run: python fetch.py ${{ matrix.shard }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: delta-${{ matrix.shard }}
@@ -87,17 +87,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: meta
           path: data
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         continue-on-error: true   # 沒有新資料時不會有 delta
         with:
           pattern: delta-*
