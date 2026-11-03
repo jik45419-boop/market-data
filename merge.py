@@ -169,6 +169,10 @@ def main():
         return
     deltas = sorted(glob.glob(str(DATA / "deltas" / "**" / "delta_*.db"), recursive=True))
     meta = open_meta()
+    if get_state(meta, "repack_sources"):   # 重新打包進行中（或中途失敗還沒接續完成）：先不合併
+        notice("略過合併", "數據包正在重新打包，等完成後再合併（這次抓到的資料下次會重抓）", "warning")
+        meta.close()
+        return
     months = set()
     for delta in deltas:
         months |= delta_months(delta)

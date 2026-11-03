@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-重新打包成「連續月份、每包壓縮後約 190MB」（可重複執行）
-  來源：年度資料庫 astock_YYYY（可能切片）
-  目標：astock_YYYY-MM_YYYY-MM.db.gz，內含 daily、m15、m60
-步驟：先決定分包計畫並存進 meta（重跑時沿用同一份）→ 逐包 下載來源 → 按月份篩選合併 → 核對每張表列數 → 上傳 → 記錄
-      → 全部完成後才刪除舊的年度資料庫。中途失敗可直接重跑。
+重新打包（可重複執行）：把現有的數據包重新切成「連續月份、壓縮後盡量接近但不超過 250MB」
+  來源：現有的區間包 astock_YYYY-MM_YYYY-MM（或舊的年度包 astock_YYYY）
+  做法：從最早的月份開始，依估算一次放入盡量多的月份 → 建包 → 實際壓縮後若超過 250MB，少放一個月重做
+        → 上傳、記錄 → 下一包從下個月開始
+  來源清單和已完成的新包都記在 meta，中途失敗重跑會接著做；全部完成後才刪除舊包
 """
 import json
 import os
 import re
 import shutil
-import sqlite3
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import (DATA, META, TABLES, get_state, gunzip_file, gzip_file, notice, now,  # noqa: E402
                     open_db, open_meta, pack_get, pack_put, set_state)
-from packing import greedy, month_bounds, month_estimates, pack_name, ym_next  # noqa: E402
+from packing import LIMIT, TARGET, month_bounds, month_estimates, pack_name, parse, ym_next  # noqa: E402
 from store import get_store  # noqa: E402
 
 WORK = DATA / "repack"
@@ -31,7 +29,16 @@ def base(n):
     return re.sub(r"\.db\.gz(\.part\d+)?$", "", n)
 
 
-def save_meta(store, meta):
+def span(name):
+    """包名 → (起月, 迄月)"""
+    p = parse(name)
+    if p:
+        return p
+    y = int(YEARLY.fullmatch(name).group(1))
+    return y * 100 + 1, y * 100 + 12
+
+
+def save(store, meta):
     meta.commit()
     gzip_file(META, DATA / "meta.db.gz")
     store.upload(DATA / "meta.db.gz", "meta.db.gz")
@@ -48,110 +55,121 @@ def main():
     os.remove(DATA / "meta.db.gz")
     meta = open_meta()
 
-    years = sorted({int(YEARLY.fullmatch(base(n)).group(1)) for n in store.files if YEARLY.fullmatch(base(n))})
-    if not years:
-        notice("重新打包", "Drive 上沒有年度資料庫，不用轉換")
-        store.upload(Path(__file__).resolve().parent / "restore.py", "restore.py", "text/x-python")
-        return
-
-    # 分包計畫（第一次決定後存起來，重跑沿用，避免中途股票清單變動造成重疊）
-    raw = get_state(meta, "repack_plan")
+    raw = get_state(meta, "repack_sources")
     if raw:
-        groups = [tuple(g) for g in json.loads(raw)]
-        print(f"沿用上次的分包計畫：{len(groups)} 包", flush=True)
+        sources = json.loads(raw)
+        built = [tuple(x) for x in json.loads(get_state(meta, "repack_built") or "[]")]
+        print(f"接續上次：來源 {len(sources)} 包，已完成 {len(built)} 包", flush=True)
     else:
-        lo_y, hi_y = years[0], years[-1]
-        est = month_estimates(meta)
-        months, ym = [], lo_y * 100 + 1
-        last_ym = max(k for k in est) if est else hi_y * 100 + 12
-        while ym <= min(hi_y * 100 + 12, last_ym):
-            months.append(ym); ym = ym_next(ym)
-        groups = [(g[0], g[-1]) for g in greedy(months, est)]
-        set_state(meta, "repack_plan", json.dumps(groups))
-        save_meta(store, meta)
-        print(f"分包計畫：{len(groups)} 包：" + "，".join(pack_name(a, b) for a, b in groups), flush=True)
+        sources = sorted({base(n) for n in store.files if parse(base(n)) or YEARLY.fullmatch(base(n))},
+                         key=lambda n: span(n)[0])
+        if not sources:
+            notice("重新打包", "Drive 上沒有數據包"); return
+        built = []
+        set_state(meta, "repack_sources", json.dumps(sources))
+        set_state(meta, "repack_built", "[]")
+        save(store, meta)
+    spans = {n: span(n) for n in sources}
+    first_ym = min(a for a, _ in spans.values())
+    last_ym = max(b for _, b in spans.values())
+    est = month_estimates(meta)
+    print(f"來源 {len(sources)} 包（{first_ym}～{last_ym}）；目標每包估算 {TARGET / 1e6:.0f}MB、上限 {LIMIT / 1e6:.0f}MB", flush=True)
 
-    uses = defaultdict(int)
-    for a, b in groups:
-        for y in range(a // 100, b // 100 + 1):
-            uses[y] += 1
     cache = {}
 
-    def src(y):
-        if y not in cache:
-            p = WORK / f"src_{y}.db"
-            if not pack_get(store, f"astock_{y}", p):
-                raise RuntimeError(f"找不到 astock_{y}")
-            cache[y] = p
-        return cache[y]
+    def src(n):
+        if n not in cache:
+            p = WORK / f"src_{n}.db"
+            if not pack_get(store, n, p):
+                raise RuntimeError(f"找不到來源 {n}")
+            cache[n] = p
+        return cache[n]
 
-    have = {base(n) for n in store.files}
-    done_names = {r[0] for r in meta.execute("SELECT name FROM packs")}
-    lines, built = [], 0
-    for i, (a, b) in enumerate(groups):
-        name = pack_name(a, b)
-        ys = list(range(a // 100, b // 100 + 1))
-        if name in have and name in done_names:
-            print(f"{name} 上次已完成，略過", flush=True)
-        else:
-            out = WORK / f"{name}.db"
-            if out.exists():
-                out.unlink()
-            conn = open_db(out, TABLES)
-            d0, d1, t0_, t1_ = month_bounds(a, b, first=(i == 0))
-            expect = defaultdict(int)
-            for y in ys:
-                conn.execute("ATTACH DATABASE ? AS s", (str(src(y)),))
-                for t, cond, args in (("daily", "date BETWEEN ? AND ?", (d0, d1)),
-                                      ("m15", "dt BETWEEN ? AND ?", (t0_, t1_)),
-                                      ("m60", "dt BETWEEN ? AND ?", (t0_, t1_))):
-                    expect[t] += conn.execute(f"SELECT COUNT(*) FROM s.{t} WHERE {cond}", args).fetchone()[0]
-                    conn.execute(f"INSERT OR REPLACE INTO main.{t} SELECT * FROM s.{t} WHERE {cond}", args)
-                conn.commit()
-                conn.execute("DETACH DATABASE s")
-            got = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
-            if any(got[t] != expect[t] for t in TABLES):
-                raise RuntimeError(f"{name}: 列數不一致 {got} vs {dict(expect)}，停止（舊資料都還在）")
-            codes, dd0, dd1 = conn.execute("SELECT COUNT(DISTINCT code), MIN(date), MAX(date) FROM daily").fetchone()
-            conn.execute("VACUUM")
-            conn.close()
-            size = os.path.getsize(out) / 1e6
-            gz = WORK / f"{name}.db.gz"
-            gzip_file(out, gz)
-            os.remove(out)
-            gz_size = os.path.getsize(gz) / 1e6
-            parts = pack_put(store, gz, name)
-            os.remove(gz)
-            meta.execute("INSERT OR REPLACE INTO packs VALUES(?,?,?,?,?,?,?,?,?)",
-                         (name, f"daily {got['daily']}，m15 {got['m15']}，m60 {got['m60']}；{parts} 個檔",
-                          sum(got.values()), codes, str(dd0), str(dd1), round(size, 1), round(gz_size, 1), now()))
-            save_meta(store, meta)
-            built += 1
-            lines.append(f"{name} 壓縮 {gz_size:.0f}MB（解壓 {size:.0f}MB）")
-            print(f"[{i + 1}/{len(groups)}] {name}：日線 {got['daily']:,}、15分 {got['m15']:,}、60分 {got['m60']:,}；"
-                  f"壓縮 {gz_size:.0f}MB／解壓 {size:.0f}MB → {parts} 個檔｜磁碟剩 {shutil.disk_usage(str(DATA)).free / 1e9:.1f}GB",
-                  flush=True)
-        for y in ys:
-            uses[y] -= 1
-            if uses[y] == 0 and y in cache:
-                os.remove(cache.pop(y))
+    def build(lo, hi, first):
+        name = pack_name(lo, hi)
+        out = WORK / f"{name}.db"
+        if out.exists():
+            out.unlink()
+        conn = open_db(out, TABLES)
+        d0, d1, t0_, t1_ = month_bounds(lo, hi, first=first)
+        expect = {t: 0 for t in TABLES}
+        for n in sources:
+            a, b = spans[n]
+            if b < lo or a > hi:
+                continue
+            conn.execute("ATTACH DATABASE ? AS s", (str(src(n)),))
+            for t, args in (("daily", (d0, d1)), ("m15", (t0_, t1_)), ("m60", (t0_, t1_))):
+                cond = "date BETWEEN ? AND ?" if t == "daily" else "dt BETWEEN ? AND ?"
+                expect[t] += conn.execute(f"SELECT COUNT(*) FROM s.{t} WHERE {cond}", args).fetchone()[0]
+                conn.execute(f"INSERT OR REPLACE INTO main.{t} SELECT * FROM s.{t} WHERE {cond}", args)
+            conn.commit()
+            conn.execute("DETACH DATABASE s")
+        got = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
+        if got != expect:
+            raise RuntimeError(f"{name}: 列數不一致 {got} vs {expect}，停止（舊資料都還在）")
+        codes, dd0, dd1 = conn.execute("SELECT COUNT(DISTINCT code), MIN(date), MAX(date) FROM daily").fetchone()
+        conn.execute("VACUUM")
+        conn.close()
+        size = os.path.getsize(out)
+        gz = WORK / f"{name}.db.gz"
+        gzip_file(out, gz)
+        os.remove(out)
+        return name, gz, got, codes, dd0, dd1, size
 
-    # 全部完成後才刪年度資料庫
+    lines = []
+    nxt = ym_next(max(b for _, b in built)) if built else first_ym
+    while nxt <= last_ym:
+        # 依估算放入盡量多的月份
+        months, size_est, m = [], 0.0, nxt
+        while m <= last_ym:
+            e = est.get(m, 0)
+            if months and size_est + e > TARGET:
+                break
+            months.append(m); size_est += e; m = ym_next(m)
+        while True:
+            name, gz, got, codes, dd0, dd1, size = build(months[0], months[-1], first=(months[0] == first_ym))
+            gz_size = os.path.getsize(gz)
+            if gz_size <= LIMIT or len(months) == 1:
+                break
+            print(f"{name} 壓縮後 {gz_size / 1e6:.0f}MB 超過上限，少放一個月重做", flush=True)
+            os.remove(gz); months.pop()
+        parts = pack_put(store, gz, name)
+        os.remove(gz)
+        meta.execute("INSERT OR REPLACE INTO packs VALUES(?,?,?,?,?,?,?,?,?)",
+                     (name, f"daily {got['daily']}，m15 {got['m15']}，m60 {got['m60']}；{parts} 個檔",
+                      sum(got.values()), codes, str(dd0), str(dd1), round(size / 1e6, 1), round(gz_size / 1e6, 1), now()))
+        built.append((months[0], months[-1]))
+        set_state(meta, "repack_built", json.dumps(built))
+        save(store, meta)
+        lines.append(f"{name} {gz_size / 1e6:.0f}MB")
+        print(f"[{len(built)}] {name}：日線 {got['daily']:,}、15分 {got['m15']:,}、60分 {got['m60']:,}；"
+              f"壓縮 {gz_size / 1e6:.0f}MB（估算 {size_est / 1e6:.0f}MB）／解壓 {size / 1e6:.0f}MB｜"
+              f"磁碟剩 {shutil.disk_usage(str(DATA)).free / 1e9:.1f}GB", flush=True)
+        nxt = ym_next(months[-1])
+        if os.environ.get("TEST_FAIL_AFTER") and len(built) >= int(os.environ["TEST_FAIL_AFTER"]):
+            raise RuntimeError("測試：模擬中途失敗")
+        for n in list(cache):                 # 用不到的來源先刪掉，省磁碟
+            if spans[n][1] < nxt:
+                os.remove(cache.pop(n))
+
+    # 全部完成後才刪舊包（新包同名的不刪）
+    new_names = {pack_name(a, b) for a, b in built}
     removed = 0
     for n in list(store.files):
-        if YEARLY.fullmatch(base(n)):
+        b = base(n)
+        if b in sources and b not in new_names:
             store.delete(n); removed += 1
-    for y in years:
-        meta.execute("DELETE FROM packs WHERE name=?", (f"astock_{y}",))
-    meta.execute("DELETE FROM state WHERE key='repack_plan'")
-    meta.execute("INSERT INTO runs VALUES(?,?)", (now(), f"重新打包成月份區間 {len(groups)} 包"))
-    save_meta(store, meta)
+    for n in sources:
+        if n not in new_names:
+            meta.execute("DELETE FROM packs WHERE name=?", (n,))
+    meta.execute("DELETE FROM state WHERE key IN ('repack_sources','repack_built','repack_plan')")
+    meta.execute("INSERT INTO runs VALUES(?,?)", (now(), f"重新打包：{len(sources)} 包 → {len(built)} 包"))
+    save(store, meta)
     meta.close()
     store.upload(Path(__file__).resolve().parent / "restore.py", "restore.py", "text/x-python")
-    sizes = [r for r in lines]
-    notice("重新打包", f"共 {len(groups)} 包（這次建立 {built} 個），刪除舊年度檔 {removed} 個；用時 {(time.time() - t0) / 60:.0f} 分鐘")
-    if sizes:
-        notice("各數據包", "；".join(sizes))
+    notice("重新打包", f"{len(sources)} 包 → {len(built)} 包，刪除舊檔 {removed} 個；用時 {(time.time() - t0) / 60:.0f} 分鐘")
+    if lines:
+        notice("各數據包", "；".join(lines))
 
 
 if __name__ == "__main__":

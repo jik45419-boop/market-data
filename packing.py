@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-分包規則：每個數據包涵蓋「連續幾個月」，壓縮後約 190MB（Drive 上的檔案大小）
+分包規則：每個數據包涵蓋「連續幾個月」，壓縮後盡量接近但不超過 250MB（Drive 上的檔案大小）
   檔名：astock_YYYY-MM_YYYY-MM.db.gz（起訖月份），內含 daily、m15、m60 三張表
   · 已經結束的包永遠不再變動
-  · 最新的包會一直加入新月份（檔名的迄月跟著改），到約 190MB 就開新包
+  · 最新的包會一直加入新月份（檔名的迄月跟著改），估計會超過目標就開新包
   · 每個月的大小用「當月上市檔數 × 交易日數 × 每列平均壓縮大小」估算，和資料抓到多少無關，所以分包結果穩定
 """
 import os
@@ -12,8 +12,10 @@ from datetime import date
 
 from common import DAILY_START, M15_START, STOCK
 
-TARGET = float(os.environ.get("PACK_TARGET_MB", "190")) * 1e6   # 每包目標（估算的壓縮後大小；測試時可調小）
-BYTES_PER_ROW = {"daily": 67, "m15": 20, "m60": 22}  # 由 2025 年實際數據包換算（略為保守）
+LIMIT = float(os.environ.get("PACK_LIMIT_MB", "250")) * 1e6     # 每包上限（壓縮後，Drive 上的大小）
+TARGET = LIMIT * 0.952                                           # 估算目標：估算誤差約 ±6%，留一點空間（250MB → 238MB）
+# 每列平均壓縮大小：用 2026-11 的 21 個實際數據包回歸校準（誤差 ≤ 6%）；15 分鐘線的數字已包含對應的 60 分鐘線
+BYTES_PER_ROW = {"daily": 59.0, "m15": 25.4, "m60": 0.0}
 NAME_RE = re.compile(r"astock_(\d{4})-(\d{2})_(\d{4})-(\d{2})")
 
 

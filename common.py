@@ -17,7 +17,8 @@ DATA = Path(os.environ.get("DATA_DIR", "data"))
 META = DATA / "meta.db"
 PACK_LIMIT_MB = 200
 # Drive 上每個檔案最多 200MiB：壓縮後超過就切成 .part01、.part02…（測試時可用 PART_MB 改小）
-PART_BYTES = int(float(os.environ.get("PART_MB", "200")) * 1024 * 1024)
+# 保險：萬一某個包壓縮後仍超過 250MB，就切成 .part01、.part02…（正常不會發生；測試時可用 PART_MB 改小）
+PART_BYTES = int(float(os.environ["PART_MB"]) * 1024 * 1024) if os.environ.get("PART_MB") else 250_000_000
 TABLES = ("daily", "m15", "m60")
 
 STOCK, ETF, INDEX = "stock", "etf", "index"
