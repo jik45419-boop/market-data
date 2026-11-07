@@ -64,8 +64,11 @@ class DriveStore:
             raise RuntimeError(f"Google 授權失敗（{e}）。檢查：{diag}") from e
         import httplib2
         from google_auth_httplib2 import AuthorizedHttp
-        self.d = build("drive", "v3", http=AuthorizedHttp(creds, http=httplib2.Http(timeout=HTTP_TIMEOUT)),
-                       cache_discovery=False)
+        h = httplib2.Http(timeout=HTTP_TIMEOUT)
+        # 續傳上傳會回 308（Resume Incomplete）；httplib2 預設把 308 當成轉址而失敗（RedirectMissingLocation），
+        # 和 googleapiclient.http.build_http() 一樣把 308 拿掉
+        h.redirect_codes = h.redirect_codes - {308}
+        self.d = build("drive", "v3", http=AuthorizedHttp(creds, http=h), cache_discovery=False)
         self.folder = self._folder()
         self.files = self._list()
 
