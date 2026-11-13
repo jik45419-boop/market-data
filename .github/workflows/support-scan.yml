@@ -1,0 +1,49 @@
+name: support-scan
+
+# 支撐位反覆反彈掃描：每次 market-update 成功後自動執行。
+# 同一個數據日期只算一次（結果已在 Drive 上就略過），所以一天 4 次更新只有第一次會真的掃描。
+on:
+  workflow_run:
+    workflows: [market-update]
+    types: [completed]
+  push:
+    paths:
+      - tools/support_scan.py
+      - .github/workflows/support-scan.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: support-scan
+  cancel-in-progress: false
+
+env:
+  GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+  GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+  GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+  # 程式有改動或手動執行時，同一天的結果也重算
+  FORCE: ${{ github.event_name != 'workflow_run' && '1' || '0' }}
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  scan:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # 已經結束的數據包抽出的日線序列會留著，之後每天只需要下載最新的一包
+      - uses: actions/cache@v5
+        with:
+          path: data/scan_cache
+          key: support-scan-${{ github.run_id }}
+          restore-keys: support-scan-
+      - name: 掃描並把結果存到 Google Drive
+        run: python tools/support_scan.py
