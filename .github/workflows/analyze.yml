@@ -24,7 +24,7 @@ env:
   GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
   GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
   PYTHONUNBUFFERED: "1"
-  DIAG: "1"            # 暫時：輸出資料診斷
+  DIAG: ""             # 設成 "1" 會加跑 tools/diag_corr.py（個股與各指數逐年相關係數）
 
 jobs:
   analyze:
