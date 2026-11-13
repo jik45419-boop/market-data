@@ -64,6 +64,8 @@ for code, name, kind, ind, drift in secs + [ETF, IDX]:
                      (raw[i] / pc - 1) * 100, ph[i] / eh[i] if val else None, ph[i] / bh[i] if val else None,
                      ph[i] / sh_[i] if val else None, ph[i] / eh[i] * 0.8 if val else None, 0, adj[i]))
 daily = pd.DataFrame(rows, columns=DAILY_COLS)
+gap_days = set(D[-200:-170])                             # 指數缺 30 個交易日
+daily = daily[~((daily.code == "sh.000300") & daily.date.isin(gap_days))].reset_index(drop=True)
 
 
 def pack(name, lo, hi, form):
@@ -138,7 +140,8 @@ assert r["industry"] == IND_A and r["peer_n"] == 3 and r["breadth"] is not None
 # 前復權後 EPS 不應該在除權日跳動（真實 EPS 每年 +15%）
 assert 0.10 < r["eps_g"] < 0.20, r["eps_g"]
 assert any("滬深300" in x for x in r["dq"]) and "資料品質提醒" in md, r["dq"]
-assert 0.6 < r["beta"] < 1.4, r["beta"]                    # 排除錯誤資料後 Beta 正常
+assert 0.6 < r["beta"] < 1.4, r["beta"]                    # 排除錯誤資料、對齊缺日後 Beta 正常
+assert r["idx_missing"] == 30 and any("缺 30 天" in x for x in r["dq"]), r["dq"]
 assert 0.10 < r["eps_cagr3"] < 0.20, r["eps_cagr3"]
 assert r["pe_pct"] is not None and r["fair"] and r["fair"][0] < r["fair"][1] < r["fair"][2]
 p = r["plan"]

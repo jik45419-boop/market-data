@@ -423,8 +423,18 @@ def analyze(data, code, name, kind, asof_arg, years, capital, risk, entry_arg, f
         r["idx_ma60_up"] = bool(ic.rolling(60).mean().iloc[-1] > ic.rolling(60).mean().iloc[-21]) if len(ic) >= 81 else None
         r["idx_r3m"] = ret(ic, 63)
         r["idx_r1y"] = ret(ic, 250)
-        j = pd.concat([lr.set_axis(df.date), np.log(ic).diff().mask(ibad)], axis=1, join="inner").dropna().tail(250)
-        r["beta"] = float(j.cov().iloc[0, 1] / j.iloc[:, 1].var()) if len(j) > 60 else None
+        # 先對齊到兩邊都有資料的交易日再算報酬；指數缺日時，避免拿多日報酬對個股單日報酬
+        last_dates = df.date.tail(250)
+        miss = int((~last_dates.isin(ic.index)).sum())
+        r["idx_missing"] = miss
+        if miss > 5:
+            dq.append(f"滬深300 在本檔近 {len(last_dates)} 個交易日中缺 {miss} 天資料，大盤相關指標（Beta、年線、季線）可能失真")
+        common = df.date[df.date.isin(ic.index)]
+        j = pd.DataFrame({"s": np.log(c.set_axis(df.date)).reindex(common).values,
+                          "i": np.log(ic).reindex(common).values}).diff()
+        j = j[~bad.set_axis(df.date).reindex(common).values & ~ibad.reindex(common).values].dropna().tail(250)
+        r["beta"] = float(j.cov().iloc[0, 1] / j.i.var()) if len(j) > 60 else None
+        r["corr"] = float(j.corr().iloc[0, 1]) if len(j) > 60 else None
     else:
         r["idx_close"] = None
     r["dq"] = dq
@@ -807,7 +817,7 @@ def report(r, manual):
     div = [t for t, x in (("RSI 頂背離", r["top_div_rsi"]), ("MACD 頂背離", r["top_div_macd"]),
                           ("RSI 底背離", r["bot_div_rsi"]), ("MACD 底背離", r["bot_div_macd"])) if x]
     w(f"| 背離 | | {'、'.join(div) or '無'} |")
-    w(f"| 年化波動 / Beta / 一年最大回撤 | {r['vol60']:.0%} / {fmt(r.get('beta'))} / {r['mdd1y']:.0%} | |")
+    w(f"| 年化波動 / Beta / 一年最大回撤 | {r['vol60']:.0%} / {fmt(r.get('beta'))} / {r['mdd1y']:.0%} | 與滬深300 相關係數 {fmt(r.get('corr'))} |")
     w("")
     w("### 關鍵價位")
     w("")
@@ -838,7 +848,7 @@ def report(r, manual):
     if r["dq"]:
         w("### 資料品質提醒")
         w("")
-        w("以下資料點的單日漲跌超過漲跌停幅度，可能是資料錯誤，已排除在波動率與 Beta 的計算之外：")
+        w("以下資料可能有問題（單日漲跌超過漲跌停的資料點已排除在波動率與 Beta 之外）：")
         w("")
         for x in r["dq"]:
             w(f"- {x}")
