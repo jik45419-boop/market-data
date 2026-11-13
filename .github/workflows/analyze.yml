@@ -14,7 +14,7 @@ on:
         default: "1000000"
   push:
     branches-ignore: [main]
-    paths: [".github/workflows/analyze.yml", "tools/analyze_targets.txt", "tools/analyze.py", "tools/analyze_ci.py"]
+    paths: [".github/workflows/analyze.yml", "tools/analyze_targets.txt", "tools/analyze.py", "tools/analyze_ci.py", "tools/diag_corr.py"]
 
 permissions:
   contents: read
@@ -24,6 +24,7 @@ env:
   GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
   GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
   PYTHONUNBUFFERED: "1"
+  DIAG: "1"            # 暫時：輸出資料診斷
 
 jobs:
   analyze:
@@ -44,6 +45,7 @@ jobs:
           # push 觸發時，從 tools/analyze_targets.txt 讀股票清單
           if [ -z "$CODES" ]; then export CODES="$(grep -v '^#' tools/analyze_targets.txt | tr '\n' ',')"; fi
           python tools/analyze_ci.py
+          if [ -n "$DIAG" ]; then python tools/diag_corr.py; fi
       - uses: actions/upload-artifact@v6
         if: always()
         with:

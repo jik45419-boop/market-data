@@ -177,6 +177,8 @@ assert slim == ["astock_2023-01_2025-12.db", "astock_2026-01_2026-11.db", "meta.
 con = sqlite3.connect(work / "data" / "astock_2023-01_2025-12.db")
 assert {x[0] for x in con.execute("SELECT DISTINCT code FROM daily")} == {"sh.600001", "sz.300003", "sh.000300"}
 ci_md = (work / "reports" / "sh600001_2026-11-13.md").read_text(encoding="utf-8")
+import diag_corr  # noqa: E402
+diag_corr.main()                                           # 缺少的指數要能略過
 assert "站上季線的個股比例" in ci_md and "同產業成交額前幾大" in ci_md
 
 print("\n===== analyze 測試全部通過 =====", file=sys.stderr)

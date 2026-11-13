@@ -44,7 +44,8 @@ def main():
     (OUT / "meta.db.gz").unlink()
     m = _Meta(OUT / "meta.db")
     targets = [analyze.resolve(m, c) for c in codes_in]
-    keep = sorted({t[0] for t in targets} | {analyze.HS300})
+    keep = sorted({t[0] for t in targets} | {analyze.HS300} |
+                  ({"sh.000016", "sh.000001", "sz.399001", "sz.399006"} if os.environ.get("DIAG") else set()))
     print("分析對象：" + "、".join(f"{c} {n}" for c, n, _ in targets), flush=True)
 
     names = sorted({analyze.PACK_RE.match(n).group(1) for n in st.files if analyze.PACK_RE.match(n)},
