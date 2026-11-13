@@ -3,3 +3,4 @@ data/
 *.db.gz
 __pycache__/
 *.json
+reports/

@@ -63,6 +63,36 @@ df["close_hfq"] = df["close"] * df["adj_factor"]                       # 後復�
 df["close_qfq"] = df["close"] * df["adj_factor"] / df["adj_factor"].iloc[-1]  # 前復權
 ```
 
+## 個股分析報告（tools/analyze.py）
+
+依「買股前個股分析清單」自動算出能量化的部分，輸出 Markdown 報告：
+
+```bash
+pip install pandas numpy
+python tools/analyze.py 600519 --dir D:/market-data                       # 代碼、sh.600519、600519.SH 或簡體名稱都可以
+python tools/analyze.py 600519 --dir D:/market-data --capital 1000000     # 加上總資金，算出建議股數
+python tools/analyze.py 600519 --dir D:/market-data --chips 4 --catalyst 3   # 補上人工評分，得到總分與決策
+python tools/analyze.py 600519 --dir D:/market-data --date 2025-06-30     # 用歷史某一天當作「今天」
+```
+
+- `--dir` 是從 Drive 下載的 market-data 資料夾；只會解壓需要的包（`.db.gz` 或分片都可以，解壓後的 `.db` 留著下次直接用）。
+  預設回看 5 年，大約需要最近 12 個包（解壓後約 10GB）；硬碟不夠就加 `--years 3`。
+- 報告存到 `reports/<代碼>_<日期>.md`，內容依清單分成七步：
+
+| 步驟 | 自動計算 | 需要人工 |
+|---|---|---|
+| 第一步 環境 | 滬深300 與年線／季線、站上季線的個股比例、產業 3 個月強弱 | 利率、匯率、政策、產業週期 |
+| 第二步 基本面 | 由估值反推的 EPS、每股淨值、每股營收、ROE、淨利率與年增率 | 財報細節、護城河、經營團隊 |
+| 第三步 估值 | PE／PB 近 N 年百分位、同業中位數與排名、PEG、三種情境合理價 | 預估 EPS |
+| 第四步 籌碼 | 量比、上漲／下跌量、OBV、換手率、漲跌停次數（代理指標） | 融資融券、北向資金、股東人數（`--chips` 評分） |
+| 第五步 技術 | 均線、週線、RSI、MACD、KD、布林、ATR、背離、支撐壓力 | — |
+| 第六步 風險 | ST、停牌、虧損、估值過高、波動、流動性、過熱等旗標 | 催化劑、反方論點（`--catalyst` 評分） |
+| 第七步 計畫 | 停損（支撐或 2×ATR）、目標價、風險報酬比、建議股數（100 股一手、單檔上限 20%） | — |
+
+基本面數字是用 `股價 ÷ PE`、`PB ÷ PE` 等反推的近似值，正式判斷仍要看財報。報告不構成投資建議。
+
+測試：`python tests/analyze_local.py`（用假資料，不連網）。
+
 ## 運作方式
 
 GitHub Actions 每天跑 4 次（台灣時間 20:00 / 02:00 / 08:00 / 14:00）：
