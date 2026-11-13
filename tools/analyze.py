@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 HS300 = "sh.000300"
+INDEX_NAMES = {"hs300": "滬深300", "sz50": "上證50", "zz500": "中證500"}
 PACK_RE = re.compile(r"^(astock_\d{4}-\d{2}_\d{4}-\d{2}|astock_\d{4})\.db(?:\.gz(?:\.part\d+)?)?$")
 
 # 與分析清單「總評分表」相同的面向與權重
@@ -246,8 +247,8 @@ def volume_nodes(df, n=120, bins=24):
 
 
 def levels(close, cands, atr_now, above):
-    """從候選價位挑出最近的兩個支撐（或壓力），彼此至少相距 0.5 ATR"""
-    gap = max(atr_now * 0.5, close * 0.005)
+    """從候選價位挑出最近的兩個支撐（或壓力），彼此至少相距 0.75 ATR 且 1.5%"""
+    gap = max(atr_now * 0.75, close * 0.015)
     xs = sorted(((p, why) for p, why in cands if p and not math.isnan(p) and
                  (p > close + gap * 0.5 if above else p < close - gap * 0.5)),
                 key=lambda x: x[0] if above else -x[0])
@@ -346,8 +347,7 @@ def analyze(data, code, name, kind, asof_arg, years, capital, risk, entry_arg, f
     r["atr_pct"] = r["atr"] / close
     r["bias20"] = close / r["ma20"] - 1
 
-    ph, pl = pivots(h, find="high"), pivots(l, find="low")            # 小轉折：找支撐壓力
-    sh, sl = pivots(h, 10, "high"), pivots(l, 10, "low")             # 波段轉折：判斷趨勢結構與背離
+    sh, sl = pivots(h, 10, "high"), pivots(l, 10, "low")             # 波段轉折：支撐壓力、趨勢結構、背離
     r["top_div_rsi"] = divergence(h, rs, sh, "high")
     r["top_div_macd"] = divergence(h, dif, sh, "high")
     r["bot_div_rsi"] = divergence(l, rs, sl, "low")
@@ -372,13 +372,15 @@ def analyze(data, code, name, kind, asof_arg, years, capital, risk, entry_arg, f
     r["turn60"] = float(df.turn.tail(60).mean()) if df.turn.notna().any() else None
     r["amount20"] = float(df.amount.tail(20).mean())
     is_gem = code.startswith(("sz.300", "sz.301"))
+    sec = data.meta.execute("SELECT ipo_date FROM securities WHERE code=?", (code,)).fetchone()
+    r["ipo"] = sec[0] if sec else None
     lim = 19.8 if is_gem and asof >= "2020-08-24" else 9.8
     pc20 = df.pct_chg.tail(20)
     r["limit_up20"] = int((pc20 >= lim).sum())
     r["limit_dn20"] = int((pc20 <= -lim).sum())
 
-    cands = [(h.iloc[i], "前高") for i in ph if i >= len(c) - 250] + \
-            [(l.iloc[i], "前低") for i in pl if i >= len(c) - 250] + \
+    cands = [(h.iloc[i], "前高") for i in sh if i >= len(c) - 250] + \
+            [(l.iloc[i], "前低") for i in sl if i >= len(c) - 250] + \
             [(r["ma20"], "月線"), (r["ma60"], "季線"), (r["ma250"], "年線"), (r["hi52"], "52 週高"),
              (r["lo52"], "52 週低")] + [(p, "成交密集區") for p in volume_nodes(df)]
     r["support"] = levels(close, cands, r["atr"], above=False)
@@ -387,22 +389,45 @@ def analyze(data, code, name, kind, asof_arg, years, capital, risk, entry_arg, f
     # 報酬、波動、相對大盤
     for key, n in (("r1w", 5), ("r1m", 21), ("r3m", 63), ("r6m", 126), ("r1y", 250)):
         r[key] = ret(c, n)
-    lr = np.log(c).diff()
+    # 資料品質：單日漲跌超過漲跌停的資料點多半是資料錯誤，列出來並排除在波動與 Beta 之外
+    dq = []
+    lim_row = pd.Series(np.where(is_gem & (df.date >= "2020-08-24"), 0.21, 0.11), index=df.index)
+    if r["ipo"]:
+        lim_row[df.date <= (date.fromisoformat(r["ipo"]) + timedelta(days=10)).isoformat()] = np.inf
+    dr = c.pct_change()
+    bad = dr.abs() > lim_row
+    for i in list(df.index[bad])[-5:]:
+        dq.append(f"{r['code']} {df.date[i]}：前復權收盤 {c[i - 1]:.2f} → {c[i]:.2f}（{dr[i]:+.1%}），"
+                  f"復權因子 {df.adj_factor[i - 1]} → {df.adj_factor[i]}")
+    if bad.sum() > 5:
+        dq.append(f"{r['code']} 另有 {int(bad.sum()) - 5} 個異常日")
+    n_adj_na = int(df.adj_factor.isna().sum())
+    if n_adj_na:
+        dq.append(f"{r['code']} 有 {n_adj_na} 天缺少復權因子（當作 1 處理，前復權價可能跳動）")
+    lr = np.log(c).diff().mask(bad)
     r["vol60"] = float(lr.tail(60).std() * math.sqrt(250))
     cy = c.tail(250)
     r["mdd1y"] = float((cy / cy.cummax() - 1).min())
     if len(idx) > 60:
         ic = idx.set_index("date").close
+        ir = ic.pct_change()
+        ibad = ir.abs() > 0.11
+        for d_ in list(ic.index[ibad])[-5:]:
+            k_ = ic.index.get_loc(d_)
+            dq.append(f"滬深300 {d_}：收盤 {ic.iloc[k_ - 1]:.2f} → {ic.iloc[k_]:.2f}（{ir.iloc[k_]:+.1%}）")
+        if ibad.sum() > 5:
+            dq.append(f"滬深300 另有 {int(ibad.sum()) - 5} 個異常日")
         r["idx_close"] = float(ic.iloc[-1])
         r["idx_ma60"] = float(ic.rolling(60).mean().iloc[-1])
         r["idx_ma250"] = float(ic.rolling(250).mean().iloc[-1]) if len(ic) >= 250 else None
         r["idx_ma60_up"] = bool(ic.rolling(60).mean().iloc[-1] > ic.rolling(60).mean().iloc[-21]) if len(ic) >= 81 else None
         r["idx_r3m"] = ret(ic, 63)
         r["idx_r1y"] = ret(ic, 250)
-        j = pd.concat([lr.set_axis(df.date), np.log(ic).diff()], axis=1, join="inner").dropna().tail(250)
+        j = pd.concat([lr.set_axis(df.date), np.log(ic).diff().mask(ibad)], axis=1, join="inner").dropna().tail(250)
         r["beta"] = float(j.cov().iloc[0, 1] / j.iloc[:, 1].var()) if len(j) > 60 else None
     else:
         r["idx_close"] = None
+    r["dq"] = dq
 
     # ---------------- 估值與由估值反推的基本面
     pe, pb, ps = df.pe_ttm, df.pb_mrq, df.ps_ttm
@@ -435,6 +460,7 @@ def analyze(data, code, name, kind, asof_arg, years, capital, risk, entry_arg, f
         g = lambda a, b: (a / b - 1) if a is not None and b and b > 0 else None
         r["eps_g"] = g(now["eps"], y1 and y1["eps"])
         r["sps_g"] = g(now["sps"], y1 and y1["sps"])
+        r["sps_stale"] = bool(r["sps_g"] is not None and abs(r["sps_g"]) < 0.001)
         r["bps_g"] = g(now["bps"], y1 and y1["bps"])
         y3 = next((x for x in hist if x["label"] == "3 年前"), None)
         r["eps_cagr3"] = ((now["eps"] / y3["eps"]) ** (1 / 3) - 1) if (
@@ -455,9 +481,7 @@ def analyze(data, code, name, kind, asof_arg, years, capital, risk, entry_arg, f
         r["industry"] = ind[0]
     members = [x[0] for x in data.meta.execute(
         "SELECT index_name FROM index_members WHERE code=? ORDER BY index_name", (code,)).fetchall()]
-    r["index_members"] = members
-    sec = data.meta.execute("SELECT ipo_date FROM securities WHERE code=?", (code,)).fetchone()
-    r["ipo"] = sec[0] if sec else None
+    r["index_members"] = [INDEX_NAMES.get(x, x) for x in members]
     if not fast and kind == "stock":
         snap_start = (date.fromisoformat(asof) - timedelta(days=130)).isoformat()
         print("讀取全市場資料（大盤寬度、產業比較）…", file=sys.stderr, flush=True)
@@ -469,8 +493,7 @@ def analyze(data, code, name, kind, asof_arg, years, capital, risk, entry_arg, f
         g = snap.groupby("code")
         last = g.tail(1).set_index("code")
         last = last[last.date == asof]
-        t3 = (date.fromisoformat(asof) - timedelta(days=91)).isoformat()
-        base = snap[snap.date <= t3].groupby("code").hfq.last()
+        base = g.hfq.apply(lambda s: s.iloc[-64] if len(s) >= 64 else np.nan)   # 63 個交易日前，和本檔一致
         r3 = (last.hfq / base).dropna() - 1
         ma60s = g.hfq.apply(lambda s: s.tail(60).mean() if len(s) >= 60 else np.nan)
         m60 = ma60s.reindex(last.index)
@@ -654,6 +677,8 @@ def report(r, manual):
         w(f"- **已評部分平均**：{total / wsum:.2f}（已評 {wsum:.0%} 權重，其餘待人工評分）")
     if r["flags"]:
         w(f"- **風險旗標**：{len(r['flags'])} 個，見第六步")
+    if r["dq"]:
+        w(f"- **資料品質**：{len(r['dq'])} 則提醒，見第六步")
     w("")
 
     w("## 基本資料")
@@ -700,6 +725,9 @@ def report(r, manual):
         w("")
         w(f"EPS 年增 {sign_pct(r['eps_g'])}，3 年年化 {sign_pct(r['eps_cagr3'])}；每股營收年增 {sign_pct(r['sps_g'])}；每股淨值年增 {sign_pct(r['bps_g'])}。")
         w("")
+        if r.get("sps_stale"):
+            w("每股營收和一年前幾乎一樣：資料源的 PS 可能還沒更新最新營收，營收成長請以財報為準。")
+            w("")
         w("這些是由 PE、PB、PS 反推的近似值，會受股本變動與財報公布時點影響；毛利率、現金流、負債比、護城河仍要看財報。")
     else:
         w("沒有估值資料（ETF、指數或資料缺漏），需人工看財報。")
@@ -807,6 +835,14 @@ def report(r, manual):
     w("")
     w("催化劑（財報、新產品、政策、指數調整）與反方論點需人工整理。")
     w("")
+    if r["dq"]:
+        w("### 資料品質提醒")
+        w("")
+        w("以下資料點的單日漲跌超過漲跌停幅度，可能是資料錯誤，已排除在波動率與 Beta 的計算之外：")
+        w("")
+        for x in r["dq"]:
+            w(f"- {x}")
+        w("")
 
     p = r["plan"]
     w("## 第七步：交易計畫")

@@ -14,7 +14,7 @@ on:
         default: "1000000"
   push:
     branches-ignore: [main]
-    paths: [".github/workflows/analyze.yml", "tools/analyze_targets.txt"]
+    paths: [".github/workflows/analyze.yml", "tools/analyze_targets.txt", "tools/analyze.py", "tools/analyze_ci.py"]
 
 permissions:
   contents: read

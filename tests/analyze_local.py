@@ -30,18 +30,24 @@ secs += [(f"sz.00{1000 + i}", f"填充{i}", "stock", IND_B, rng.normal(0.0002, 0
 ETF, IDX = ("sh.510300", "沪深300ETF", "etf", None, 0.0003), ("sh.000300", "沪深300", "index", None, 0.0003)
 
 
-def series(drift, vol=0.02):
-    lr = rng.normal(drift, vol, N)
+MKT = rng.normal(0, 0.012, N)                            # 大盤共同因子：個股 Beta 約 1
+
+
+def series(drift, vol=0.016):
+    lr = MKT + rng.normal(drift, vol, N)
     lr[-120:] += 0.002 if drift > 0.0005 else 0          # 主角最近走強
     return 20 * np.exp(np.cumsum(lr))
 
 
 rows = []
 for code, name, kind, ind, drift in secs + [ETF, IDX]:
-    ph = series(drift)                                   # 後復權價
+    ph = series(drift, 0.002 if kind == "index" else 0.016)   # 後復權價；指數幾乎就是大盤因子
     adj = np.where(np.array(D) >= "2023-07-10", 1.1, 1.0)  # 2023-07-10 除權：不復權價下跌 1/1.1
     adj = np.where(np.array(D) >= "2025-06-20", adj * 1.05, adj)
     raw = ph / adj
+    if code == "sh.000300":
+        raw = raw.copy()
+        raw[N - 300] *= 1.6                              # 指數資料錯誤：單日 +60% 再跌回
     eh = 0.8 * np.exp(np.linspace(0, 0.14 * 7.9, N))      # EPS 每年約 +15%（後復權尺度）
     bh = 6 * np.exp(np.linspace(0, 0.08 * 7.9, N))
     sh_ = 9 * np.exp(np.linspace(0, 0.10 * 7.9, N))
@@ -131,6 +137,8 @@ assert (tmp / "astock_2026-01_2026-11.db").exists()                # .gz 已自�
 assert r["industry"] == IND_A and r["peer_n"] == 3 and r["breadth"] is not None
 # 前復權後 EPS 不應該在除權日跳動（真實 EPS 每年 +15%）
 assert 0.10 < r["eps_g"] < 0.20, r["eps_g"]
+assert any("滬深300" in x for x in r["dq"]) and "資料品質提醒" in md, r["dq"]
+assert 0.6 < r["beta"] < 1.4, r["beta"]                    # 排除錯誤資料後 Beta 正常
 assert 0.10 < r["eps_cagr3"] < 0.20, r["eps_cagr3"]
 assert r["pe_pct"] is not None and r["fair"] and r["fair"][0] < r["fair"][1] < r["fair"][2]
 p = r["plan"]
