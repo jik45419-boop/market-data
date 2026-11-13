@@ -100,6 +100,15 @@ with open(tmp / "meta.db", "rb") as a, gzip.open(tmp / "meta.db.gz", "wb") as b:
     shutil.copyfileobj(a, b)
 (tmp / "meta.db").unlink()
 
+# 模擬 Drive：所有數據包都是 .db.gz（或分片），給 analyze_ci.py 用
+drive = Path(tempfile.mkdtemp())
+for f in tmp.iterdir():
+    if f.suffix == ".db":
+        with open(f, "rb") as a, gzip.open(drive / (f.name + ".gz"), "wb") as b:
+            shutil.copyfileobj(a, b)
+    else:
+        shutil.copy(f, drive / f.name)
+
 # ---------------- 指標單元測試
 up = pd.Series(np.arange(1, 60, dtype=float))
 assert analyze.rsi(up).iloc[-1] == 100
@@ -142,5 +151,23 @@ r4 = analyze.main(["SH510300", "--dir", str(tmp), "--out", str(tmp / "r4.md")])
 assert r4["kind"] == "etf" and not r4["has_val"]
 assert analyze.resolve(analyze.Data(tmp), "sh.600004")[1] == "测试丁"
 
+# ---------------- GitHub Actions 流程：從（模擬的）Drive 下載、精簡、分析
+import os  # noqa: E402
+work = Path(tempfile.mkdtemp())
+os.environ.update(LOCAL_STORE=str(drive), ANALYZE_DIR=str(work / "data"), CODES="600001, 测试丙", YEARS="3")
+os.chdir(work)
+import analyze_ci  # noqa: E402
+analyze_ci.main()
+reports = sorted(p.name for p in (work / "reports").iterdir())
+assert reports == ["sh600001_2026-11-13.md", "sz300003_2026-11-13.md"], reports
+slim = sorted(p.name for p in (work / "data").iterdir())
+# 回看 3 年只需要 2023-10 之後：最舊的包不下載，大檔用完就刪
+assert slim == ["astock_2023-01_2025-12.db", "astock_2026-01_2026-11.db", "meta.db"], slim
+con = sqlite3.connect(work / "data" / "astock_2023-01_2025-12.db")
+assert {x[0] for x in con.execute("SELECT DISTINCT code FROM daily")} == {"sh.600001", "sz.300003", "sh.000300"}
+ci_md = (work / "reports" / "sh600001_2026-11-13.md").read_text(encoding="utf-8")
+assert "站上季線的個股比例" in ci_md and "同產業成交額前幾大" in ci_md
+
 print("\n===== analyze 測試全部通過 =====", file=sys.stderr)
-shutil.rmtree(tmp)
+for d in (tmp, drive, work):
+    shutil.rmtree(d)

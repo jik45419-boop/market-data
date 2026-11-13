@@ -1,0 +1,52 @@
+name: analyze
+
+on:
+  workflow_dispatch:
+    inputs:
+      codes:
+        description: "要分析的股票，逗號分隔（代碼或簡體名稱）"
+        default: "600519"
+      years:
+        description: "回看年數"
+        default: "5"
+      capital:
+        description: "總資金（元），用來算建議股數"
+        default: "1000000"
+  push:
+    branches-ignore: [main]
+    paths: [".github/workflows/analyze.yml", "tools/analyze_targets.txt"]
+
+permissions:
+  contents: read
+
+env:
+  GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+  GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+  GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pandas numpy
+      - name: 分析
+        env:
+          CODES: ${{ github.event.inputs.codes }}
+          YEARS: ${{ github.event.inputs.years }}
+          CAPITAL: ${{ github.event.inputs.capital }}
+        run: |
+          # push 觸發時，從 tools/analyze_targets.txt 讀股票清單
+          if [ -z "$CODES" ]; then export CODES="$(grep -v '^#' tools/analyze_targets.txt | tr '\n' ',')"; fi
+          python tools/analyze_ci.py
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: reports
+          path: reports/
+          if-no-files-found: ignore
