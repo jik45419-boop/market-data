@@ -129,6 +129,21 @@ class DriveStore:
         if old:
             self._purge(old)
 
+    def sub(self, name):
+        """market-data 底下的子資料夾（沒有就新建），回傳一個只看那個資料夾的 store"""
+        q = f"name='{name}' and mimeType='{FOLDER_MIME}' and '{self.folder}' in parents and trashed=false"
+        res = self.d.files().list(q=q, fields="files(id)", spaces="drive").execute(num_retries=5).get("files", [])
+        if res:
+            fid = res[0]["id"]
+        else:
+            fid = self.d.files().create(body={"name": name, "mimeType": FOLDER_MIME, "parents": [self.folder]},
+                                        fields="id").execute(num_retries=5)["id"]
+            print(f"已在 Drive 的 {FOLDER_NAME} 裡建立資料夾 {name}", flush=True)
+        s = object.__new__(DriveStore)
+        s.d, s.folder = self.d, fid
+        s.files = s._list()
+        return s
+
     def put_text(self, name, text, keep_revisions=False):
         """原地覆蓋一個小文字檔（檔案 ID 不變，方便別的程式用固定 ID 讀）；第一次會新建。回傳檔案 ID。
         覆蓋會留下舊版本，檔案很小不佔空間；keep_revisions=False 時順手刪掉舊版本"""
@@ -218,6 +233,9 @@ class LocalStore:
     def upload(self, path, name, mimetype=None):
         shutil.copy(path, self.root / name)
         self.files[name] = self.root / name
+
+    def sub(self, name):
+        return LocalStore(self.root / name)
 
     def put_text(self, name, text, keep_revisions=False):
         (self.root / name).write_text(text, encoding="utf-8")

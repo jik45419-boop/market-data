@@ -6,7 +6,8 @@
 
 Drive 上的檔案
   news_live.txt               最新的快訊與公告（JSON 文字，原地覆蓋、檔案 ID 固定），有新內容才更新，最快每分鐘一次
-  news_YYYY-MM-DD.jsonl.gz    當天抓到的全部內容（一行一則），每 10 分鐘與結束時存檔；重新啟動會接著當天的檔案繼續
+  news/news_YYYY-MM-DD.csv    「news」子資料夾：每天一個 CSV，當天抓到的全部內容（一列一則），永久保存、不會自動刪；
+                              每 10 分鐘與結束時存檔；重新啟動會接著當天的檔案繼續。Excel、Google 試算表可以直接開
 
 執行方式
   GitHub 的排程不準時，所以一次執行會連續跑幾個小時（RUN_MIN），由排程接力；同一時間只會有一個在跑。
@@ -14,7 +15,7 @@ Drive 上的檔案
 
 用法：python news_live.py           環境變數 RUN_MIN（預設 345）、POLL_SEC（預設 60）、LOCAL_STORE（本地測試）
 """
-import gzip
+import csv
 import json
 import os
 import re
@@ -35,6 +36,9 @@ SUM_LEN = 140
 NIGHT_OFF = os.environ.get("NIGHT_OFF", "1") == "1"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 WORK = Path(os.environ.get("DATA_DIR", "data"))
+ARCHIVE_DIR = "news"
+CSV_HEAD = ["時間", "類型", "標題", "摘要", "股票代碼", "股票名稱", "相關代碼", "連結", "編號"]
+CSV_KEYS = ["t", "kind", "title", "sum", "code", "name", "stocks", "url", "id"]
 
 
 def now_bj():
@@ -81,20 +85,21 @@ def fetch_ann():
 
 
 class Day:
-    """當天的存檔（一行一則）"""
+    """當天的存檔（CSV，一列一則）"""
 
     def __init__(self, store, day):
         self.store, self.day, self.items, self.dirty = store, day, {}, False
-        self.name = f"news_{day}.jsonl.gz"
+        self.name = f"news_{day}.csv"
         WORK.mkdir(parents=True, exist_ok=True)
         self.path = WORK / self.name
         if store.exists(self.name):
             try:
                 store.download(self.name, self.path)
-                with gzip.open(self.path, "rt", encoding="utf-8") as fh:
-                    for line in fh:
-                        if line.strip():
-                            it = json.loads(line)
+                with open(self.path, encoding="utf-8-sig", newline="") as fh:
+                    for row in list(csv.reader(fh))[1:]:
+                        it = dict(zip(CSV_KEYS, row))
+                        it["stocks"] = [x for x in it.get("stocks", "").split(" ") if x]
+                        if it.get("id"):
                             self.items[it["id"]] = it
             except Exception as e:      # noqa: BLE001  壞檔就從空的開始，新的會覆蓋它
                 print(f"讀不到 {self.name}（{type(e).__name__}: {e}），從空的開始", flush=True)
@@ -109,12 +114,15 @@ class Day:
     def save(self):
         if not self.dirty:
             return
-        with gzip.open(self.path, "wt", encoding="utf-8") as fh:
+        with open(self.path, "w", encoding="utf-8-sig", newline="") as fh:      # 帶 BOM：Excel 直接開不會亂碼
+            w = csv.writer(fh)
+            w.writerow(CSV_HEAD)
             for it in sorted(self.items.values(), key=lambda x: x["t"]):
-                fh.write(json.dumps(it, ensure_ascii=False, separators=(",", ":")) + "\n")
-        self.store.upload(self.path, self.name)
+                w.writerow([" ".join(it.get(k) or []) if k == "stocks" else ((it.get("col") or it.get("sum", "")) if k == "sum" else it.get(k, ""))
+                            for k in CSV_KEYS])
+        self.store.upload(self.path, self.name, mimetype="text/csv")
         self.dirty = False
-        print(f"已存檔 {self.name}（{len(self.items)} 則）", flush=True)
+        print(f"已存檔 {ARCHIVE_DIR}/{self.name}（{len(self.items)} 則）", flush=True)
 
 
 def live_text(fast, ann, errors):
@@ -128,7 +136,9 @@ def live_text(fast, ann, errors):
 def main():
     store = get_store()
     t0, loop, n_new, n_put = time.time(), 0, 0, 0
-    day = Day(store, now_bj().strftime("%Y-%m-%d"))
+    arch = store.sub(ARCHIVE_DIR)
+    store.delete("news_2026-11-14.jsonl.gz")      # 第一版測試時留在外層的舊格式存檔
+    day = Day(arch, now_bj().strftime("%Y-%m-%d"))
     fast = {k: v for k, v in day.items.items() if v["kind"] == "快訊"}
     ann = {k: v for k, v in day.items.items() if v["kind"] == "公告"}
     print(f"開始：今天已有 {len(day.items)} 則，最多跑 {RUN_MIN:.0f} 分鐘，每 {POLL_SEC:.0f} 秒一輪", flush=True)
@@ -141,7 +151,7 @@ def main():
         today = bj.strftime("%Y-%m-%d")
         if today != day.day:                       # 換日：存好昨天的，開新的一天
             day.save()
-            day = Day(store, today)
+            day = Day(arch, today)
         changed = False
         jobs = [("快訊", fetch_fast, fast)] + ([("公告", fetch_ann, ann)] if loop % ANN_EVERY == 0 else [])
         for name, fn, pool in jobs:
