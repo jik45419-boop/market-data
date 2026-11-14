@@ -1,0 +1,49 @@
+name: news-live
+
+# 全市場即時新聞：每分鐘抓快訊、每 5 分鐘抓公告，存到 Drive 的 market-data 資料夾（news_live.txt 與每天的 news_日期.jsonl.gz）
+# GitHub 排程不準時，所以每次執行連續跑約 5 小時 45 分，每 3 小時排一次接力；同一時間只會有一個在跑，後到的排隊等前一個結束
+# 北京時間 0～7 點不抓
+on:
+  schedule:
+    - cron: "55 22 * * *"    # 北京 06:55
+    - cron: "55 1 * * *"
+    - cron: "55 4 * * *"
+    - cron: "55 7 * * *"
+    - cron: "55 10 * * *"
+    - cron: "55 13 * * *"    # 北京 21:55，跑到 24:00 自己結束
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "最多跑幾分鐘"
+        default: "345"
+  push:
+    branches: ["ccr-bfc7974d-lza6z0"]     # 開發分支測試用：只跑 4 分鐘
+    paths: ["news_live.py", "store.py", ".github/workflows/news.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: news-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      RUN_MIN: ${{ github.event_name == 'push' && '4' || github.event.inputs.minutes || '345' }}
+      NIGHT_OFF: ${{ github.event_name == 'schedule' && '1' || '0' }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 抓即時新聞並存到 Drive
+        run: python news_live.py

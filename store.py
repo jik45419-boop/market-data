@@ -129,6 +129,27 @@ class DriveStore:
         if old:
             self._purge(old)
 
+    def put_text(self, name, text, keep_revisions=False):
+        """原地覆蓋一個小文字檔（檔案 ID 不變，方便別的程式用固定 ID 讀）；第一次會新建。回傳檔案 ID。
+        覆蓋會留下舊版本，檔案很小不佔空間；keep_revisions=False 時順手刪掉舊版本"""
+        from googleapiclient.http import MediaInMemoryUpload
+        m = MediaInMemoryUpload(text.encode("utf-8"), mimetype="text/plain", resumable=False)
+        fid = self.files.get(name)
+        if fid:
+            _run(lambda: self.d.files().update(fileId=fid, media_body=m, fields="id").execute(num_retries=3), f"更新 {name}")
+        else:
+            fid = _run(lambda: self.d.files().create(body={"name": name, "parents": [self.folder]}, media_body=m,
+                                                     fields="id").execute(num_retries=3), f"建立 {name}")["id"]
+            self.files[name] = fid
+        if not keep_revisions:
+            try:
+                revs = self.d.revisions().list(fileId=fid, fields="revisions(id)").execute(num_retries=3).get("revisions", [])
+                for r in revs[:-1]:
+                    self.d.revisions().delete(fileId=fid, revisionId=r["id"]).execute(num_retries=3)
+            except Exception as e:      # 刪不掉不影響數據
+                print(f"刪除 {name} 舊版本失敗：{e}", flush=True)
+        return fid
+
     def _purge(self, file_id):
         try:
             self.d.files().delete(fileId=file_id).execute(num_retries=5)
@@ -197,6 +218,11 @@ class LocalStore:
     def upload(self, path, name, mimetype=None):
         shutil.copy(path, self.root / name)
         self.files[name] = self.root / name
+
+    def put_text(self, name, text, keep_revisions=False):
+        (self.root / name).write_text(text, encoding="utf-8")
+        self.files[name] = self.root / name
+        return name
 
     def cleanup(self):
         return "本地測試：不用清理"
