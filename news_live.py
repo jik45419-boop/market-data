@@ -88,24 +88,34 @@ class Day:
     """當天的存檔（CSV，一列一則）"""
 
     def __init__(self, store, day):
-        self.store, self.day, self.items, self.dirty = store, day, {}, False
+        self.store, self.day, self.dirty = store, day, False
         self.name = f"news_{day}.csv"
         WORK.mkdir(parents=True, exist_ok=True)
         self.path = WORK / self.name
-        if store.exists(self.name):
-            try:
-                store.download(self.name, self.path)
-                with open(self.path, encoding="utf-8-sig", newline="") as fh:
-                    for row in list(csv.reader(fh))[1:]:
-                        it = dict(zip(CSV_KEYS, row))
-                        it["stocks"] = [x for x in it.get("stocks", "").split(" ") if x]
-                        if it.get("id"):
-                            self.items[it["id"]] = it
-            except Exception as e:      # noqa: BLE001  壞檔就從空的開始，新的會覆蓋它
-                print(f"讀不到 {self.name}（{type(e).__name__}: {e}），從空的開始", flush=True)
+        self.items = self._read(self.name)
+        # 前一天已經存過的編號：每天第一次啟動會抓到昨晚的內容，不要再存進今天的檔案
+        prev = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        self.known = set(self._read(f"news_{prev}.csv"))
+
+    def _read(self, name):
+        out = {}
+        if not self.store.exists(name):
+            return out
+        try:
+            path = WORK / name
+            self.store.download(name, path)
+            with open(path, encoding="utf-8-sig", newline="") as fh:
+                for row in list(csv.reader(fh))[1:]:
+                    it = dict(zip(CSV_KEYS, row))
+                    it["stocks"] = [x for x in it.get("stocks", "").split(" ") if x]
+                    if it.get("id"):
+                        out[it["id"]] = it
+        except Exception as e:      # noqa: BLE001  壞檔就當作沒有，新的會覆蓋它
+            print(f"讀不到 {name}（{type(e).__name__}: {e}），當作空的", flush=True)
+        return out
 
     def add(self, it):
-        if it["id"] in self.items:
+        if it["id"] in self.items or it["id"] in self.known:
             return False
         self.items[it["id"]] = it
         self.dirty = True
