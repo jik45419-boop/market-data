@@ -89,7 +89,7 @@ class DriveStore:
         out, token = {}, None
         while True:
             res = _run(lambda: self.d.files().list(
-                q=f"'{self.folder}' in parents and trashed=false",
+                q=f"'{self.folder}' in parents and trashed=false and mimeType != '{FOLDER_MIME}'",
                 fields="nextPageToken, files(id,name,size)", orderBy="modifiedTime",
                 pageSize=1000, pageToken=token).execute(num_retries=5), "列出檔案")   # 同名時以最新的為準
             for f in res.get("files", []):
@@ -183,7 +183,7 @@ class DriveStore:
         freed = 0
         token = None
         while True:
-            res = self.d.files().list(q=f"'{self.folder}' in parents and trashed=true",
+            res = self.d.files().list(q=f"'{self.folder}' in parents and trashed=true and mimeType != '{FOLDER_MIME}'",
                                       fields="nextPageToken, files(id,size)", pageSize=1000,
                                       pageToken=token).execute(num_retries=5)
             for f in res.get("files", []):
@@ -193,7 +193,7 @@ class DriveStore:
                 break
         seen, token = {}, None
         while True:
-            res = self.d.files().list(q=f"'{self.folder}' in parents and trashed=false",
+            res = self.d.files().list(q=f"'{self.folder}' in parents and trashed=false and mimeType != '{FOLDER_MIME}'",
                                       fields="nextPageToken, files(id,name,size)", orderBy="modifiedTime desc",
                                       pageSize=1000, pageToken=token).execute(num_retries=5)
             for f in res.get("files", []):

@@ -35,7 +35,7 @@ jobs:
       GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
       GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
       GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
-      RUN_MIN: ${{ github.event_name == 'push' && '4' || github.event.inputs.minutes || '345' }}
+      RUN_MIN: ${{ github.event_name == 'push' && '22' || github.event.inputs.minutes || '345' }}
       NIGHT_OFF: ${{ github.event_name == 'schedule' && '1' || '0' }}
       PYTHONUNBUFFERED: "1"
     steps:
