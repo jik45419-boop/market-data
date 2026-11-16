@@ -1,11 +1,15 @@
 name: news-live
 
 # 全市場即時新聞：每分鐘抓快訊、每 5 分鐘抓公告，存到 Drive 的 market-data 資料夾（news_live.txt 與每天的 news_日期.jsonl.gz）
-# GitHub 排程不準時，所以每次執行連續跑約 5 小時 45 分，每 3 小時排一次接力；同一時間只會有一個在跑，後到的排隊等前一個結束
-# 北京時間 0～7 點不抓
+# GitHub 排程不準時、偶爾會漏掉一次，所以每次執行連續跑約 5 小時 45 分，由排程接力；同一時間只會有一個在跑，後到的排隊等前一個結束
+# （排隊中的被更新的一次取代時，紀錄上會顯示 cancelled，是正常的）
+# 早上多排幾次：早上沒有前一次在跑，漏掉一次就會空好幾個小時。每次啟動都會往回補抓 26 小時內沒存過的
+# 北京時間 0～7 點不抓（早上啟動時補回來）
 on:
   schedule:
     - cron: "55 22 * * *"    # 北京 06:55
+    - cron: "55 23 * * *"    # 北京 07:55（早上備援）
+    - cron: "55 0 * * *"     # 北京 08:55（早上備援）
     - cron: "55 1 * * *"
     - cron: "55 4 * * *"
     - cron: "55 7 * * *"
@@ -17,14 +21,14 @@ on:
         description: "最多跑幾分鐘"
         default: "345"
   push:
-    branches: ["ccr-bfc7974d-lza6z0"]     # 開發分支測試用：只跑 4 分鐘
+    branches: ["ccr-bfc7974d-lza6z0"]     # 開發分支測試用：只跑 4 分鐘，存在執行機器的暫存資料夾，不碰 Drive 上的正式檔案
     paths: ["news_live.py", "store.py", ".github/workflows/news.yml"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: news-live
+  group: news-live${{ github.event_name == 'push' && '-test' || '' }}     # 測試不和正式執行排同一隊
   cancel-in-progress: false
 
 jobs:
@@ -36,6 +40,7 @@ jobs:
       GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
       GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
       RUN_MIN: ${{ github.event_name == 'push' && '4' || github.event.inputs.minutes || '345' }}
+      LOCAL_STORE: ${{ github.event_name == 'push' && '/tmp/news-test' || '' }}
       NIGHT_OFF: ${{ github.event_name == 'schedule' && '1' || '0' }}
       PYTHONUNBUFFERED: "1"
     steps:

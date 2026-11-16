@@ -10,8 +10,11 @@ Drive 上的檔案
                               每 10 分鐘與結束時存檔；重新啟動會接著當天的檔案繼續。Excel、Google 試算表可以直接開
 
 執行方式
-  GitHub 的排程不準時，所以一次執行會連續跑幾個小時（RUN_MIN），由排程接力；同一時間只會有一個在跑。
+  GitHub 的排程不準時、偶爾還會漏掉一次，所以一次執行會連續跑幾個小時（RUN_MIN），由排程接力；同一時間只會有一個在跑。
   北京時間 0～7 點不抓（NIGHT_OFF=0 可關掉這個限制）。
+  補抓：每次啟動都往回翻頁，把最近 26 小時內還沒存過的補齊（夜間、或排程漏掉的那段）；
+        平常每一輪如果整頁都是新的，也會繼續往回翻，直到接上已經有的為止。
+  不重複：存過的不再存（比對當天與前一天的檔案）；比前一天更早的內容不收。
 
 用法：python news_live.py           環境變數 RUN_MIN（預設 345）、POLL_SEC（預設 60）、LOCAL_STORE（本地測試）
 """
@@ -33,6 +36,9 @@ ANN_EVERY = 5            # 每幾輪抓一次公告
 SAVE_EVERY = 10          # 每幾輪存一次當天存檔
 LIVE_FAST, LIVE_ANN = 60, 150
 SUM_LEN = 140
+BACK_HOURS = 26                       # 啟動時往回補抓幾小時
+PAGES_START = dict(快訊=80, 公告=120)   # 啟動補抓最多翻幾頁（快訊每頁 50 則、公告每頁 100 則）
+PAGES_LOOP = dict(快訊=10, 公告=30)     # 平常每一輪最多翻幾頁
 NIGHT_OFF = os.environ.get("NIGHT_OFF", "1") == "1"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 WORK = Path(os.environ.get("DATA_DIR", "data"))
@@ -45,9 +51,15 @@ def now_bj():
     return datetime.now(timezone.utc) + timedelta(hours=8)
 
 
-def http(url, referer=None):
+def http(url, referer=None, tries=3):
     req = urllib.request.Request(url, headers=dict(UA, **({"Referer": referer} if referer else {})))
-    return json.loads(urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "ignore"))
+    for i in range(tries):
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "ignore"))
+        except Exception:      # noqa: BLE001  連線偶爾被重設：等一下再試
+            if i == tries - 1:
+                raise
+            time.sleep(2 * (i + 1))
 
 
 def clean(s, n=None):
@@ -55,33 +67,67 @@ def clean(s, n=None):
     return s if not n or len(s) <= n else s[:n] + "…"
 
 
-def fetch_fast():
-    url = ("https://np-listapi.eastmoney.com/comm/web/getFastNewsList?client=web&biz=web_724&fastColumn=102&sortEnd="
-           f"&pageSize=50&req_trace={int(time.time() * 1000)}")
-    out = []
-    for x in (http(url, "https://kuaixun.eastmoney.com/").get("data") or {}).get("fastNewsList") or []:
-        code = str(x.get("code") or "")
-        if not code:
-            continue
-        out.append(dict(id="f" + code, kind="快訊", t=str(x.get("showTime", ""))[:19], title=clean(x.get("title")) or clean(x.get("summary"), 40),
-                        sum=clean(x.get("summary"), SUM_LEN), stocks=[str(s) for s in x.get("stockList") or []][:8],
-                        url=f"https://finance.eastmoney.com/a/{code}.html"))
-    return out
+def fast_pages(max_pages):
+    """7x24 快訊，一頁一頁往回翻（新 → 舊）"""
+    sort_end = ""
+    for _ in range(max_pages):
+        url = ("https://np-listapi.eastmoney.com/comm/web/getFastNewsList?client=web&biz=web_724&fastColumn=102"
+               f"&sortEnd={sort_end}&pageSize=50&req_trace={int(time.time() * 1000)}")
+        data = http(url, "https://kuaixun.eastmoney.com/").get("data") or {}
+        out = []
+        for x in data.get("fastNewsList") or []:
+            code = str(x.get("code") or "")
+            if not code:
+                continue
+            out.append(dict(id="f" + code, kind="快訊", t=str(x.get("showTime", ""))[:19], title=clean(x.get("title")) or clean(x.get("summary"), 40),
+                            sum=clean(x.get("summary"), SUM_LEN), stocks=[str(s) for s in x.get("stockList") or []][:8],
+                            url=f"https://finance.eastmoney.com/a/{code}.html"))
+        if not out:
+            return
+        yield out
+        sort_end = str(data.get("sortEnd") or "")
+        if not sort_end:
+            return
 
 
-def fetch_ann():
-    url = "https://np-anotice-stock.eastmoney.com/api/security/ann?sr=-1&page_size=100&page_index=1&ann_type=SHA,SZA&client_source=web"
-    out = []
-    for x in (http(url).get("data") or {}).get("list") or []:
-        art, codes = str(x.get("art_code") or ""), x.get("codes") or []
-        if not art or not codes:
-            continue
-        c = codes[0]
-        out.append(dict(id="a" + art, kind="公告", t=str(x.get("display_time") or "")[:19], title=clean(x.get("title")),
-                        code=str(c.get("stock_code", "")), name=clean(c.get("short_name")),
-                        col="、".join(k.get("column_name", "") for k in x.get("columns") or []),
-                        url=f"https://data.eastmoney.com/notices/detail/{c.get('stock_code')}/{art}.html"))
-    return out
+def ann_pages(max_pages):
+    """滬深全市場公告，一頁一頁往回翻（新 → 舊）"""
+    for page in range(1, max_pages + 1):
+        url = ("https://np-anotice-stock.eastmoney.com/api/security/ann?sr=-1&page_size=100"
+               f"&page_index={page}&ann_type=SHA,SZA&client_source=web")
+        out = []
+        for x in (http(url).get("data") or {}).get("list") or []:
+            art, codes = str(x.get("art_code") or ""), x.get("codes") or []
+            if not art or not codes:
+                continue
+            c = codes[0]
+            out.append(dict(id="a" + art, kind="公告", t=str(x.get("display_time") or "")[:19], title=clean(x.get("title")),
+                            code=str(c.get("stock_code", "")), name=clean(c.get("short_name")),
+                            col="、".join(k.get("column_name", "") for k in x.get("columns") or []),
+                            url=f"https://data.eastmoney.com/notices/detail/{c.get('stock_code')}/{art}.html"))
+        if not out:
+            return
+        yield out
+
+
+def pull(pages, pool, floor, deep):
+    """
+    往回翻頁收集 pool 裡還沒有的。停止條件：翻到比 floor 更早；或（平常）這一頁裡已經有存過的＝接上了。
+    deep=True（啟動時）不管有沒有接上，一律翻到 floor。中途某一頁抓不到：保留已經拿到的，例外往上丟給下一輪處理前先回傳
+    """
+    got, err = [], None
+    try:
+        for items in pages:
+            fresh = [it for it in items if it["id"] not in pool]
+            got += fresh
+            if min((it["t"] for it in items if it["t"]), default="") < floor:
+                break
+            if not deep and len(fresh) < len(items):
+                break
+            time.sleep(0.25)
+    except Exception as e:      # noqa: BLE001
+        err = e
+    return got, err
 
 
 class Day:
@@ -94,8 +140,14 @@ class Day:
         self.path = WORK / self.name
         self.items = self._read(self.name)
         # 前一天已經存過的編號：每天第一次啟動會抓到昨晚的內容，不要再存進今天的檔案
-        prev = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-        self.known = set(self._read(f"news_{prev}.csv"))
+        self.prev = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        self.known = set(self._read(f"news_{self.prev}.csv"))
+        old = [k for k, v in self.items.items() if v["t"] and v["t"][:10] < self.prev]      # 舊版程式重複存進來的更早內容：拿掉
+        for k in old:
+            del self.items[k]
+        if old:
+            self.dirty = True
+            print(f"{self.name}：拿掉 {len(old)} 則比 {self.prev} 更早、以前的檔案已經有的內容", flush=True)
 
     def _read(self, name):
         out = {}
@@ -116,6 +168,8 @@ class Day:
 
     def add(self, it):
         if it["id"] in self.items or it["id"] in self.known:
+            return False
+        if it["t"] and it["t"][:10] < self.prev:      # 比前一天更早的（例如週一看到的上週五公告）：以前的檔案已經有了
             return False
         self.items[it["id"]] = it
         self.dirty = True
@@ -163,17 +217,23 @@ def main():
             day.save()
             day = Day(arch, today)
         changed = False
-        jobs = [("快訊", fetch_fast, fast)] + ([("公告", fetch_ann, ann)] if loop % ANN_EVERY == 0 else [])
-        for name, fn, pool in jobs:
-            try:
-                for it in fn():
-                    if it["id"] not in pool:
-                        pool[it["id"]] = it
-                        changed = True
-                        n_new += day.add(it)
+        deep = loop == 0
+        floor = (bj - timedelta(hours=BACK_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+        jobs = [("快訊", fast_pages, fast)] + ([("公告", ann_pages, ann)] if loop % ANN_EVERY == 0 else [])
+        for name, pages, pool in jobs:
+            got, err = pull(pages((PAGES_START if deep else PAGES_LOOP)[name]), pool, floor, deep)
+            added = 0
+            for it in got:
+                pool[it["id"]] = it
+                changed = True
+                added += day.add(it)
+            n_new += added
+            if deep or len(got) > 60:
+                print(f"{bj:%H:%M} {name}：這一輪拿到 {len(got)} 則沒看過的，存進今天的檔案 {added} 則", flush=True)
+            if err is None:
                 last_err.pop(name, None)
-            except Exception as e:      # noqa: BLE001  抓不到就等下一輪
-                last_err[name] = f"{name}：{type(e).__name__} {str(e)[:100]}（{bj:%H:%M}）"
+            else:                                   # 抓不到就等下一輪
+                last_err[name] = f"{name}：{type(err).__name__} {str(err)[:100]}（{bj:%H:%M}）"
                 print(last_err[name], flush=True)
         for pool, cap in ((fast, LIVE_FAST * 3), (ann, LIVE_ANN * 3)):      # 記憶體裡只留最近的
             if len(pool) > cap:
