@@ -383,7 +383,45 @@ DATASETS = [
     ("japan_cpi", "日本 CPI 年率", "海外", "金十", lambda: A().macro_japan_cpi_yoy(), ""),
     ("global_index", "海外指数日线（标普、纳指、道指、中国金龙、恒指、国企、恒生科技）", "海外", "新浪",
         lambda: concat_named(list(GLOBAL_IDX)), ""),
+    # ---------------- 10 政策與大事件（放最後：要用上面抓到的上證指數計算市場反應）
+    ("events", "历年重要政策与大事件（含上证当天及之后 5/20/60 日涨跌）", "政策事件", "人工整理 events.csv", events_table,
+        "可直接編輯 events.csv 增補；漲跌以事件前一交易日收盤為基準"),
 ]
+
+
+EVENTS_CSV = Path(__file__).resolve().parent / "events.csv"
+
+
+def events_table():
+    """歷年重要政策／大事件（events.csv，人工整理）＋當天及之後 5／20／60 個交易日的上證指數漲跌"""
+    ev = pd.read_csv(EVENTS_CSV, dtype=str).fillna("")
+    try:
+        con = sqlite3.connect(str(DB))
+        px = pd.read_sql("select 期間 as d, close from cn_index_daily where 品種='上证指数' order by 期間", con)
+        con.close()
+    except Exception:  # noqa: BLE001
+        px = pd.DataFrame(columns=["d", "close"])
+    if len(px):
+        px["close"] = px["close"].astype(float)
+        days, closes = list(px["d"]), list(px["close"])
+        import bisect
+        out = {k: [] for k in ("上证收盘", "当天涨跌%", "之后5日%", "之后20日%", "之后60日%", "计算基准日")}
+        for d in ev["日期"]:
+            i = bisect.bisect_left(days, d)          # 事件當天（非交易日就用下一個交易日）
+            if i >= len(days) or i == 0:
+                for k in out:
+                    out[k].append(None)
+                continue
+            base = closes[i - 1]                    # 事件前一個交易日收盤
+            out["计算基准日"].append(days[i - 1])
+            out["上证收盘"].append(closes[i])
+            out["当天涨跌%"].append(round((closes[i] / base - 1) * 100, 2))
+            for n, k in ((5, "之后5日%"), (20, "之后20日%"), (60, "之后60日%")):
+                j = i + n - 1
+                out[k].append(round((closes[j] / base - 1) * 100, 2) if j < len(days) else None)
+        for k, v in out.items():
+            ev[k] = v
+    return ev
 
 
 def _cffex(d):
