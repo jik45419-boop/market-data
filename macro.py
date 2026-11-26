@@ -329,6 +329,54 @@ def sw_industry_daily():
     return concat_named(items)
 
 
+SZ_HDR = {"Referer": "https://fund.szse.cn/marketdata/fundslist/index.html"}
+SZ_FALLBACK = ("159919", "159915", "159922", "159901", "159949", "159845", "159952", "159925")
+_sz_top = None
+
+
+def szse_top_etfs(n=40):
+    """深交所規模最大的 n 檔股票型 ETF（抓不到清單就用固定的寬基 ETF）"""
+    global _sz_top
+    if _sz_top is None:
+        try:
+            d = A().fund_etf_scale_szse()
+            d = d[d["投资类别"].astype(str).str.contains("股票")].sort_values("基金份额", ascending=False)
+            _sz_top = list(dict.fromkeys(list(SZ_FALLBACK) + list(d["基金代码"].astype(str).head(n))))
+        except Exception as e:  # noqa: BLE001
+            log(f"  深交所 ETF 清單抓不到（{type(e).__name__}），用固定的 {len(SZ_FALLBACK)} 檔寬基 ETF")
+            _sz_top = list(SZ_FALLBACK)
+    return _sz_top
+
+
+def szse_size(code, start, end):
+    """深交所單一基金在 start～end 的每日份額（一次最多約 4 個月，每頁 20 筆）"""
+    rows, page = [], 1
+    while True:
+        p = {"SHOWTYPE": "JSON", "CATALOGID": "fund_jjgm", "TABKEY": "tab1", "txtDm": code,
+             "txtStart": start, "txtEnd": end, "PAGENO": page}
+        js = http_get("https://fund.szse.cn/api/report/ShowReport/data", p, SZ_HDR, timeout=20, tries=6).json()
+        t = js[0]
+        rows += t.get("data") or []
+        if page >= (t.get("metadata") or {}).get("pagecount", 0):
+            break
+        page += 1
+        time.sleep(0.4)
+    return rows
+
+
+def szse_etf_quarter(qend):
+    """一季：前 40 大股票型 ETF 的每日份額（份）"""
+    y, mo = int(qend[:4]), int(qend[5:7])
+    qstart = f"{y}-{mo - 2:02d}-01"
+    out = []
+    for code in szse_top_etfs():
+        for r in szse_size(code, qstart, qend):
+            out.append({"日期": r["size_date"], "基金代码": r["fund_code"], "基金简称": r["security_short_name"],
+                        "基金份额": float(str(r["current_size"]).replace(",", "")) * 1e4})
+        time.sleep(0.3)
+    return pd.DataFrame(out)
+
+
 def us_macro_em():
     d = em_dc("RPT_ECONOMICVALUE_USA", sort="REPORT_DATE")
     d = d[["INDICATOR_NAME", "INDICATOR_ID", "REPORT_DATE", "PUBLISH_DATE", "VALUE", "PRE_VALUE"]]
@@ -423,6 +471,8 @@ DATASETS = [
         lambda d: A().stock_hold_num_cninfo(date=_q(d)), 2), "户数减少＝筹码集中"),
     ("etf_shares_sse", "上交所 ETF 每日份额（看国家队买宽基 ETF）", "国家队社保", "上海证券交易所", ("day", "2012-05-28",
         lambda d: A().fund_etf_scale_sse(date=_q(d)), 3), "全部沪市 ETF；510300、510050、510500 等的份额暴增常被视为国家队进场"),
+    ("etf_shares_szse", "深交所 ETF 每日份额（规模前 40 大股票型 ETF，含 159919、159915 等宽基）", "国家队社保", "深圳证券交易所",
+        ("quarter", "2016-03-31", szse_etf_quarter, 1), "来源约从 2016 年起；份额单位：份"),
     # ---------------- 6 資金面
     ("margin_sse", "沪市融资融券", "资金面", "上交所（金十）", lambda: A().stock_margin_sse_js(), ""),
     ("margin_szse", "深市融资融券", "资金面", "深交所（金十）", lambda: A().stock_margin_szse_js(), ""),
@@ -455,6 +505,10 @@ DATASETS = [
     # ---------------- 8 衍生品
     ("qvix", "中国波指（期权隐含波动率，50ETF／300ETF／1000 等）", "衍生品", "期权论坛",
         lambda: concat_named([(n, getattr(A(), f)) for n, f in QVIX]), "数字越大越恐慌"),
+    ("option_stats_sse", "上交所 ETF 期权每日统计（认沽／认购比 PCR、成交、持仓）", "衍生品", "上海证券交易所", ("day", "2015-02-09",
+        lambda d: A().option_daily_stats_sse(date=_q(d)), 3), "50ETF 期权 2015-02 上市；PCR 偏高＝避险需求强"),
+    ("option_stats_szse", "深交所 ETF 期权每日统计（认沽／认购比 PCR、成交、持仓）", "衍生品", "深圳证券交易所", ("day", "2019-12-23",
+        lambda d: A().option_daily_stats_szse(date=_q(d)), 3), "300ETF 期权 2019-12 上市"),
     ("cffex_rank", "中金所股指期货前 20 名会员持仓（IF/IH/IC/IM）", "衍生品", "中国金融期货交易所", ("day", "2010-04-16",
         lambda d: _cffex(d), 2), "可看中信等头部席位净空单变化"),
     # ---------------- 9 海外
@@ -553,8 +607,63 @@ def _drop_dup_cols(df):
     return df.loc[:, ~pd.Index(df.columns).duplicated()]
 
 
+# 官方公布時間（估計，偏保守＝寧可晚不可早）：(期間結束後第幾個月, 幾號)
+#   回測用「可用日」才不會偷看未來：例如 2026-10 的 CPI 要到 2026-11-15 前後才公布
+RELEASE_RULES = {
+    "cn_cpi": (1, 15), "cn_ppi": (1, 15), "cn_pmi": (1, 1), "cn_pmi_cx_mfg": (1, 3), "cn_pmi_cx_svc": (1, 5),
+    "cn_gdp": (1, 20), "cn_retail": (1, 18), "cn_ip": (1, 18), "cn_fai": (1, 18), "cn_trade": (1, 15),
+    "cn_consumer_conf": (2, 1), "cn_enterprise_boom": (2, 1), "cn_real_estate": (1, 18), "cn_house_price": (1, 18),
+    "cn_electricity": (1, 22), "cn_freight": (1, 22), "cn_fdi": (1, 20), "cn_fiscal_revenue": (1, 25), "cn_tax": (1, 25),
+    "cn_money_supply": (1, 15), "cn_social_financing": (1, 15), "cn_new_credit": (1, 15), "cn_rmb_loan": (1, 15),
+    "cn_rmb_deposit": (1, 15), "cn_fx_gold_reserve": (1, 8), "cn_bank_financing": (1, 15),
+    "industry_indicators": (1, 25), "policy_uncertainty": (1, 10), "japan_cpi": (1, 25),
+}
+
+
+def release_date(period, rule):
+    """期間（YYYY-MM／YYYYQn／YYYY-MM-DD 代表的那個月）→ 估計公布日 YYYY-MM-DD"""
+    if not period:
+        return None
+    m = re.match(r"^(\d{4})Q(\d)$", period)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2)) * 3
+    else:
+        m = re.match(r"^(\d{4})-(\d{2})", period)
+        if not m:
+            return None
+        y, mo = int(m.group(1)), int(m.group(2))
+    k, day = rule
+    mo += k
+    y += (mo - 1) // 12
+    mo = (mo - 1) % 12 + 1
+    return f"{y}-{mo:02d}-{day:02d}"
+
+
+def add_release(con, sid, df):
+    """加上「公布日(估)」「首次抓到日」「可用日」三欄（只有月／季資料）。
+    首次抓到日：這個期間第一次出現在資料裡的日期（從開始記錄之後才有；歷史期間沒有，用公布日(估)）"""
+    if sid not in RELEASE_RULES or "期間" not in df.columns:
+        return df
+    con.execute("create table if not exists _first_seen(id text, period text, seen text, primary key(id, period))")
+    existed = con.execute("select 1 from sqlite_master where type='table' and name=?", (sid,)).fetchone()
+    if existed:
+        old = {r[0] for r in con.execute(f'select distinct "期間" from "{sid}"')}
+        new = sorted(set(df["期間"].dropna()) - old)
+        con.executemany("insert or ignore into _first_seen values(?,?,?)", [(sid, p, today().isoformat()) for p in new])
+    seen = dict(con.execute("select period, seen from _first_seen where id=?", (sid,)).fetchall())
+    df = df.copy()
+    pos = list(df.columns).index("期間") + 1
+    est = df["期間"].map(lambda p: release_date(p, RELEASE_RULES[sid]))
+    fs = df["期間"].map(seen.get)
+    df.insert(pos, "公布日(估)", est)
+    df.insert(pos + 1, "首次抓到日", fs)
+    df.insert(pos + 2, "可用日", fs.where(fs.notna(), est))
+    return df
+
+
 def write_full(con, sid, df):
     df = _drop_dup_cols(_clean(add_period(df)))
+    df = add_release(con, sid, df)
     tmp = f"_new_{sid}"
     con.execute(f'drop table if exists "{tmp}"')
     df.to_sql(tmp, con, index=False)
