@@ -1,0 +1,47 @@
+name: macro-data
+
+# 股市相關數據（歷年）：宏觀、貨幣、商品、匯率、國家隊／社保、資金面、估值情緒、衍生品、海外
+# 每天抓一次，更新 Drive 上 market-data 資料夾的 macro.db.gz 和「股市相关数据_历年.xlsx」
+# 逐日／逐季的歷史（ETF 份額、股指期貨持倉、機構持倉）第一次要好幾個小時，每次抓數據最多 180 分鐘、算市場寬度最多 120 分鐘，沒做完下次接著做
+on:
+  schedule:
+    - cron: "17 13 * * *"     # 北京時間 21:17（收盤、晚間數據公布之後）
+    - cron: "17 1 * * *"      # 北京時間 09:17（隔夜海外數據）
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: "最多跑幾分鐘"
+        default: "180"
+      only:
+        description: "只抓指定的數據（逗號分隔，空白＝全部；名稱見 python macro.py --list）"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macro-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      BUDGET_MIN: ${{ github.event.inputs.budget || '180' }}
+      BREADTH_MIN: "120"
+      ONLY: ${{ github.event.inputs.only || '' }}
+      TQDM_DISABLE: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-macro.txt
+      - name: 抓數據並上傳到 Drive
+        run: python macro_job.py

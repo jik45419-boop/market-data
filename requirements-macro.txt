@@ -1,0 +1,4 @@
+akshare==1.20.70
+pandas
+openpyxl
+requests
