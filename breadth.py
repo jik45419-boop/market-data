@@ -92,6 +92,28 @@ def daily_stats(df):
     return out.reset_index().rename(columns={"date": "期間"})
 
 
+def _refresh(store):
+    """重新列出 Drive 上的檔案（最新的數據包每天會換檔名）"""
+    if hasattr(store, "_list"):
+        store.files = store._list()
+    elif hasattr(store, "root"):
+        store.files = {p.name: p for p in Path(store.root).iterdir()}
+
+
+def _download(store, lo, name, path):
+    """下載數據包；失敗（例如同時有行情更新把最新包換掉）就重新列檔案、找涵蓋同一起月的新檔名再試一次"""
+    try:
+        if pack_get(store, name, path):
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    _refresh(store)
+    for lo2, hi2, name2 in existing(store):
+        if lo2 == lo and pack_get(store, name2, path):
+            return name2
+    raise RuntimeError(f"下載不到 {name}（重新列檔案後也找不到）")
+
+
 def update(store, con, workdir, log=print, max_minutes=120):
     """從 Drive 上的數據包算市場寬度，寫進 con（macro.db）。回傳新增天數"""
     t0 = time.monotonic()
@@ -112,14 +134,13 @@ def update(store, con, workdir, log=print, max_minutes=120):
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     carry = None
-    results = []
+    total = 0
     for lo, hi, name in packs:
         if (time.monotonic() - t0) / 60 > max_minutes:
             log(f"市場寬度：時間到，停在 {name} 之前（下次接著算）")
             break
         path = workdir / f"{name}.db"
-        if not pack_get(store, name, path):
-            raise RuntimeError(f"下載不到 {name}")
+        name = _download(store, lo, name, path)
         c = sqlite3.connect(str(path))
         df = pd.read_sql(STOCK_SQL, c)
         c.close()
@@ -132,16 +153,15 @@ def update(store, con, workdir, log=print, max_minutes=120):
         out = df[df["date"].isin(pack_dates) & (df["tradestatus"] == 1) & df["preclose"].gt(0)]
         if last:
             out = out[out["date"] > last]
-        if len(out):
-            results.append(daily_stats(out))
+        if len(out):           # 每個包算完就寫進資料庫：中途出錯，已經算好的不會不見
+            res = daily_stats(out).sort_values("期間")
+            res["腾落线ADL"] = adl0 + res["涨跌家数差"].cumsum()
+            adl0 = int(res["腾落线ADL"].iloc[-1])
+            res.to_sql(TABLE, con, index=False, if_exists="append")
+            con.commit()
+            total += len(res)
+            last = res["期間"].iloc[-1]
         base = ["code", "date", "close", "preclose", "amount", "tradestatus", "is_st", "adj_factor"]
         carry = df[base].groupby("code", sort=False).tail(KEEP)
         log(f"市場寬度：{name} 完成（{len(out)} 筆股票日）")
-    if not results:
-        return 0
-    res = pd.concat(results, ignore_index=True).sort_values("期間")
-    res = res.groupby("期間", as_index=False).last()              # 同一天出現在兩個包（不該發生）只留一筆
-    res["腾落线ADL"] = adl0 + res["涨跌家数差"].cumsum()
-    res.to_sql(TABLE, con, index=False, if_exists="append")
-    con.commit()
-    return len(res)
+    return total
