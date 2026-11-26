@@ -82,10 +82,15 @@ def add_period(df, col=None):
     """在最前面加「期間」欄並由舊到新排序；col＝日期欄（不給就自動找第一個認得出日期的欄）"""
     if df is None or df.empty:
         return df
-    cols = [col] if col else list(df.columns)
+    if col:
+        cols = [col]
+    else:       # 名稱像日期的欄位優先（避免把股票代碼當成日期）
+        key = re.compile(r"日|期|时间|時間|月|季|date|dt|time", re.I)
+        cols = [c for c in df.columns if key.search(str(c))] + [c for c in df.columns if not key.search(str(c))]
     for c in cols:
         p = df[c].map(norm_period)
-        if p.notna().mean() > 0.8:
+        ok = p.dropna()
+        if len(ok) and p.notna().mean() > 0.8 and ok.str[:4].astype(int).between(1900, 2100).all():
             df = df.copy()
             df.insert(0, "期間", p)
             return df.sort_values("期間", kind="stable").reset_index(drop=True)
@@ -126,11 +131,30 @@ def em_dc(report, flt="", cols="ALL", sort="", page_size=500, max_pages=400):
     return pd.DataFrame(rows)
 
 
+def em_dc_by_year(report, flt, date_col, cols="ALL", start=2000):
+    """東方財富 數據中心最多只給 100 頁（5 萬筆）：按年份切開抓"""
+    out = []
+    for y in range(start, today().year + 1):
+        f = f"{flt}({date_col}>='{y}-01-01')({date_col}<='{y}-12-31')"
+        d = em_dc(report, f, cols=cols, sort=date_col)
+        if len(d):
+            out.append(d)
+        time.sleep(0.3)
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
 def fred(ids):
     """FRED（聖路易聯儲）：多個序列合成一張長表 series, date, value"""
-    out = []
+    out, bad = [], []
     for sid in ids:
-        r = http_get("https://fred.stlouisfed.org/graph/fredgraph.csv", {"id": sid}, timeout=60, tries=2)
+        try:
+            r = http_get("https://fred.stlouisfed.org/graph/fredgraph.csv", {"id": sid}, timeout=60, tries=3)
+        except Exception as e:  # noqa: BLE001
+            bad.append(sid)
+            log(f"  FRED {sid} 失敗：{type(e).__name__}")
+            if len(bad) >= 5 and not out:
+                raise
+            continue
         d = pd.read_csv(io.StringIO(r.text))
         d.columns = ["date", "value"]
         d["value"] = pd.to_numeric(d["value"], errors="coerce")
@@ -138,6 +162,8 @@ def fred(ids):
         d.insert(0, "series", sid)
         out.append(d)
         time.sleep(0.5)
+    if not out:
+        raise RuntimeError("FRED 全部失敗")
     return pd.concat(out, ignore_index=True)
 
 
@@ -156,13 +182,27 @@ def em_kline(secid, name):
 
 
 def concat_named(items):
-    """[(名稱, 函式)] → 一張表，多一欄「品種」"""
-    out = []
+    """[(名稱, 函式)] → 一張表，多一欄「品種」；個別品種失敗會重試，仍失敗就略過（全部失敗才算失敗）"""
+    out, bad = [], []
     for name, fn in items:
-        d = fn()
+        d = None
+        for i in range(3):
+            try:
+                d = fn()
+                break
+            except Exception as e:  # noqa: BLE001
+                err = e
+                time.sleep(5 * (i + 1))
+        if d is None or len(d) == 0:
+            bad.append(name)
+            log(f"  {name} 失敗：{type(err).__name__ if d is None else '沒有資料'}")
+            continue
+        d = d.copy()
         d.insert(0, "品種", name)
         out.append(d)
         time.sleep(0.5)
+    if not out:
+        raise RuntimeError("全部品種都失敗")
     return pd.concat(out, ignore_index=True)
 
 
@@ -245,7 +285,7 @@ HOLDER_COLS = {"END_DATE": "报告期", "NOTICE_DATE": "公告日", "SECURITY_CO
 
 
 def holders(flt):
-    d = em_dc("RPT_F10_EH_FREEHOLDERS", flt, cols=",".join(HOLDER_COLS), sort="END_DATE")
+    d = em_dc_by_year("RPT_F10_EH_FREEHOLDERS", flt, "END_DATE", cols=",".join(HOLDER_COLS), start=2004)
     return d.rename(columns=HOLDER_COLS)
 
 
