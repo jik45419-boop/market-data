@@ -148,7 +148,7 @@ def fred(ids):
     out, bad = [], []
     for sid in ids:
         try:
-            r = http_get("https://fred.stlouisfed.org/graph/fredgraph.csv", {"id": sid}, timeout=60, tries=3)
+            r = http_get("https://fred.stlouisfed.org/graph/fredgraph.csv", {"id": sid}, timeout=30, tries=2)
         except Exception as e:  # noqa: BLE001
             bad.append(sid)
             log(f"  FRED {sid} 失敗：{type(e).__name__}")
@@ -233,6 +233,12 @@ def trade_days(start):
     return [d for d in _cal if start <= d <= t]
 
 
+def sw_months(start):
+    """申萬月報的日期（每月最後一個交易日）"""
+    d = ak().index_analysis_week_month_sw(symbol="month")
+    return sorted(str(x)[:10] for x in d.iloc[:, 0] if str(x)[:10] >= start)
+
+
 def years(start):
     return [str(y) for y in range(int(start), today().year + 1)]
 
@@ -289,6 +295,38 @@ def holders(flt):
     # 來源同一筆（同股票、同報告期、同股東、同持股數）常重複 3～5 次，只留一筆
     d = d.drop_duplicates(["SECURITY_CODE", "END_DATE", "HOLDER_NAME", "HOLD_NUM"])
     return d.rename(columns=HOLDER_COLS)
+
+
+def epu():
+    """中國經濟政策不確定性指數（Baker-Bloom-Davis；Davis-Liu-Sheng）：多張表合成長表"""
+    out = []
+    for url, tag in (("https://www.policyuncertainty.com/media/China_Mainland_Paper_EPU.xlsx", "大陆报纸"),
+                     ("https://www.policyuncertainty.com/media/SCMP_China_Policy_Uncertainty_Data.xlsx", "南华早报")):
+        r = http_get(url, timeout=60)
+        for sheet, d in pd.read_excel(io.BytesIO(r.content), sheet_name=None).items():
+            d = d.iloc[:, :3].dropna()
+            d.columns = ["year", "month", "value"]
+            d = d[pd.to_numeric(d["year"], errors="coerce").notna()]
+            d["期間"] = [f"{int(y)}-{int(m):02d}" for y, m in zip(d["year"], d["month"])]
+            d.insert(0, "指数", f"{tag}：{sheet}")
+            out.append(d[["指数", "期間", "value"]].rename(columns={"value": "数值"}))
+    return pd.concat(out, ignore_index=True)
+
+
+def industry_indicators():
+    """東方財富 行業指標（運價、鋼鐵、有色、汽車、手機、貨運、電力、地產銷售、保費…，約 150 項）"""
+    cols = "REPORT_DATE,BOARD_NAME,INDICATOR_ID,INDICATOR_NAME,INDICATOR_VALUE,CHANGE_RATE"
+    d = em_dc_by_year("RPT_INDUSTRY_INDEX", "", "REPORT_DATE", cols=cols, start=1990)
+    d = d.drop_duplicates(["INDICATOR_ID", "REPORT_DATE"])
+    return d.rename(columns={"REPORT_DATE": "日期", "BOARD_NAME": "所属行业", "INDICATOR_ID": "指标代码",
+                             "INDICATOR_NAME": "指标", "INDICATOR_VALUE": "数值", "CHANGE_RATE": "变动%"})
+
+
+def sw_industry_daily():
+    info = A().index_first_info_sw()
+    items = [(n, (lambda c=c.split(".")[0]: A().index_hist_sw(symbol=c, period="day")))
+             for c, n in zip(info["行业代码"], info["行业名称"])]
+    return concat_named(items)
 
 
 def us_macro_em():
@@ -425,7 +463,19 @@ DATASETS = [
     ("japan_cpi", "日本 CPI 年率", "海外", "金十", lambda: A().macro_japan_cpi_yoy(), ""),
     ("global_index", "海外指数日线（标普、纳指、道指、中国金龙、恒指、国企、恒生科技）", "海外", "新浪",
         lambda: concat_named(list(GLOBAL_IDX)), ""),
-    # ---------------- 10 政策與大事件（放最後：要用上面抓到的上證指數計算市場反應）
+    # ---------------- 10 產業
+    ("industry_indicators", "行业指标（运价、钢铁、有色、汽车、手机出货、货运、用电、地产销售、保费等）", "产业", "东方财富 行业指数",
+        industry_indicators, "长表：一列一个指标一期；Excel 里转成一栏一个指标"),
+    ("sw_industry_daily", "申万一级行业指数日线（31 个行业）", "产业", "申万宏源", lambda: sw_industry_daily(), "看行业轮动、强弱"),
+    ("sw_industry_monthly", "申万行业月报（市盈率、市净率、股息率、涨跌幅）", "产业", "申万宏源", ("month", "2000-01-01",
+        lambda d: A().index_analysis_monthly_sw(symbol="一级行业", date=_q(d)), 2), "每月最后一个交易日"),
+    ("fund_industry_alloc", "公募基金行业配置（每季）", "产业", "巨潮资讯", ("quarter", "2007-03-31",
+        lambda d: A().fund_report_industry_allocation_cninfo(date=_q(d)), 2), "看基金加减仓哪些行业"),
+    ("cn_energy_index", "中国能源指数", "产业", "金十", lambda: A().macro_china_energy_index(), ""),
+    # ---------------- 11 政策
+    ("policy_uncertainty", "中国经济政策不确定性指数（EPU）与贸易政策不确定性（TPU）", "政策事件", "policyuncertainty.com",
+        epu, "数字越高代表政策越不确定；学术界常用"),
+    # ---------------- 12 政策與大事件（放最後：要用上面抓到的上證指數計算市場反應）
     ("events", "历年重要政策与大事件（含上证当天及之后 5/20/60 日涨跌）", "政策事件", "人工整理 events.csv", lambda: events_table(),
         "可直接編輯 events.csv 增補；漲跌以事件前一交易日收盤為基準"),
 ]
@@ -565,7 +615,7 @@ def run_full(con, ds):
 
 def run_periodic(con, ds):
     sid, name, cat, src, (unit, start, fn, refresh), note = ds
-    plist = {"quarter": quarter_ends, "day": trade_days, "year": years}[unit](start)
+    plist = {"quarter": quarter_ends, "day": trade_days, "year": years, "month": sw_months}[unit](start)
     done = {r[0] for r in con.execute("select period from _progress where id=?", (sid,))}
     recent = set(plist[-refresh:]) if refresh else set()
     todo = [p for p in plist if p not in done or p in recent]
@@ -597,7 +647,7 @@ def run_periodic(con, ds):
         time.sleep(0.6)
     left = len([p for p in plist if p not in {r[0] for r in con.execute("select period from _progress where id=?", (sid,))}])
     extra = f"；還有 {left} 期沒抓，下次繼續" if left else ""
-    mark(con, sid, name, cat, src, f"逐{ {'quarter': '季', 'day': '日', 'year': '年'}[unit] }", note + extra if note else extra.lstrip("；"),
+    mark(con, sid, name, cat, src, f"逐{ {'quarter': '季', 'day': '日', 'year': '年', 'month': '月'}[unit] }", note + extra if note else extra.lstrip("；"),
          n_fail == 0, err)
     log(f"{'✓' if n_fail == 0 else '△'} {sid} {name}：本次 {n_ok} 期成功、{n_fail} 期失敗{extra}")
     return n_fail == 0
@@ -653,6 +703,10 @@ def export(db, outdir, max_rows=300_000):
                 pd.read_sql(f'select * from "{sid}"', con).to_csv(outdir / f"{sid}.csv.gz", index=False, encoding="utf-8-sig")
                 continue
             df = pd.read_sql(f'select * from "{sid}"', con)
+            if sid == "industry_indicators":
+                df = df.pivot_table(index="期間", columns="指标", values="数值").reset_index()
+            elif sid == "policy_uncertainty":
+                df = df.pivot_table(index="期間", columns="指数", values="数值").reset_index()
             if sid in ("fred", "us_macro"):          # 長表轉寬表，一欄一個指標
                 if sid == "fred":
                     df = df.pivot_table(index="date", columns="series", values="value").rename(columns=FRED_IDS)
