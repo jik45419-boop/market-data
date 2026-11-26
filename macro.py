@@ -377,6 +377,91 @@ def szse_etf_quarter(qend):
     return pd.DataFrame(out)
 
 
+CB_AREAS = {"US": "美国 联准会", "XM": "欧元区 欧洲央行", "GB": "英国 英格兰银行", "JP": "日本 日本央行", "CN": "中国 人民银行",
+            "TW": "台湾 中央银行", "KR": "韩国 韩国银行", "HK": "香港 金管局", "CA": "加拿大", "AU": "澳洲", "CH": "瑞士",
+            "IN": "印度", "BR": "巴西", "MX": "墨西哥", "RU": "俄罗斯", "TR": "土耳其", "SE": "瑞典", "NZ": "纽西兰"}
+_cb = None
+TW_CBC_URL = "https://www.cbc.gov.tw/public/data/OpenData/%E7%B6%93%E7%A0%94%E8%99%95/EG28D01.csv"
+
+
+def bis_policy_daily():
+    """國際清算銀行 各國央行政策利率（每日）"""
+    global _cb
+    if _cb is None:
+        url = ("https://stats.bis.org/api/v1/data/WS_CBPOL/D." + "+".join(CB_AREAS)
+               + "/all?format=csv&startPeriod=1990-01-01")
+        d = pd.read_csv(io.StringIO(http_get(url, timeout=120).text), usecols=["REF_AREA", "TIME_PERIOD", "OBS_VALUE"])
+        d["OBS_VALUE"] = pd.to_numeric(d["OBS_VALUE"], errors="coerce")
+        d = d.dropna()
+        try:      # 台灣：BIS 沒有，改用中央銀行開放資料（重貼現率，只有調整日）
+            tw = pd.read_csv(io.StringIO(http_get(TW_CBC_URL, timeout=60).content.decode("utf-8-sig")), dtype=str)
+            tw = pd.DataFrame({"REF_AREA": "TW", "TIME_PERIOD": pd.to_datetime(tw.iloc[:, 0]).dt.strftime("%Y-%m-%d"),
+                               "OBS_VALUE": pd.to_numeric(tw.iloc[:, 1], errors="coerce")}).dropna()
+            d = pd.concat([d[d["REF_AREA"] != "TW"], tw], ignore_index=True)
+        except Exception as e:  # noqa: BLE001
+            log(f"  台灣央行利率抓不到：{type(e).__name__}")
+        _cb = d.sort_values(["REF_AREA", "TIME_PERIOD"]).reset_index(drop=True)
+    return _cb
+
+
+def _runs(g, min_days=7):
+    """一個國家的利率序列 → 去掉維持不到 min_days 天的短暫跳動（早期用市場利率的國家）後的 [(日期, 利率)]"""
+    vals, dates = list(g["OBS_VALUE"]), list(g["TIME_PERIOD"])
+    runs = []
+    for d, v in zip(dates, vals):
+        if not runs or abs(runs[-1][1] - v) > 1e-9:
+            runs.append([d, v])
+    keep = []
+    for i, (d, v) in enumerate(runs):
+        nxt = runs[i + 1][0] if i + 1 < len(runs) else None
+        if nxt is None or (date.fromisoformat(nxt) - date.fromisoformat(d)).days >= min_days:
+            if not keep or abs(keep[-1][1] - v) > 1e-9:
+                keep.append((d, v))
+    return keep
+
+
+def cb_rates_monthly():
+    d = bis_policy_daily().copy()
+    d["月"] = d["TIME_PERIOD"].str[:7]
+    w = d.groupby(["月", "REF_AREA"])["OBS_VALUE"].last().unstack()
+    months = pd.period_range("1990-01", today().strftime("%Y-%m"), freq="M").strftime("%Y-%m")
+    w = w.reindex(months).ffill()            # 台灣只有調整日：沿用上一次的利率
+    w = w[[c for c in CB_AREAS if c in w.columns]]
+    return w.rename(columns=CB_AREAS).rename_axis("期間").reset_index()
+
+
+def cb_rate_changes():
+    """每一次升息／降息：日期、國家、調整前後、幅度（基點），加上之後 20 個交易日的上證、標普 500 漲跌"""
+    d = bis_policy_daily()
+    out = []
+    for area, g in d.groupby("REF_AREA"):
+        runs = _runs(g)
+        for (d0, v0), (d1, v1) in zip(runs, runs[1:]):
+            bp = round((v1 - v0) * 100, 1)
+            if abs(bp) < 5:            # 小於 5 基點的變動多半是市場利率波動，不是政策調整
+                continue
+            out.append({"日期": d1, "央行": CB_AREAS.get(area, area), "代码": area, "调整前%": v0,
+                        "调整后%": v1, "幅度(基点)": bp, "方向": "升息" if bp > 0 else "降息"})
+    ch = pd.DataFrame(out).sort_values(["日期", "代码"]).reset_index(drop=True)
+    try:                      # 市場反應：用前面抓到的指數日線
+        con = sqlite3.connect(str(DB))
+        for name, sql in (("上证", "select 期間 d, close c from cn_index_daily where 品種='上证指数' order by 期間"),
+                          ("标普500", "select 期間 d, close c from global_index where 品種='标普500' order by 期間")):
+            px = pd.read_sql(sql, con)
+            days, closes = list(px["d"]), [float(x) for x in px["c"]]
+            import bisect
+            r = []
+            for dt in ch["日期"]:
+                i = bisect.bisect_left(days, dt)
+                j = i + 19
+                r.append(round((closes[j] / closes[i - 1] - 1) * 100, 2) if 0 < i and j < len(days) else None)
+            ch[f"{name}之后20日%"] = r
+        con.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return ch
+
+
 def us_macro_em():
     d = em_dc("RPT_ECONOMICVALUE_USA", sort="REPORT_DATE")
     d = d[["INDICATOR_NAME", "INDICATOR_ID", "REPORT_DATE", "PUBLISH_DATE", "VALUE", "PRE_VALUE"]]
@@ -516,6 +601,10 @@ DATASETS = [
     ("fred", "美国金融／流动性（PCE、初请、美联储资产负债表、TGA、逆回购、VIX、美债、美元、比特币等）", "海外", "FRED 圣路易斯联储",
         lambda: fred(list(FRED_IDS)), "长表：series 是 FRED 代码，中文名称见 Excel 目录"),
     ("dxy", "美元指数 DXY", "海外", "东方财富", lambda: em_kline("100.UDI", "美元指数"), ""),
+    ("cb_policy_rates", "主要国家央行政策利率（月底，18 国／地区：美、欧、英、日、中、台、韩、港等）", "海外", "国际清算银行 BIS；台湾：中央银行开放资料",
+        cb_rates_monthly, "1990 年起；一栏一个国家"),
+    ("cb_rate_changes", "各国央行每一次升息／降息纪录（含上证、标普之后 20 日涨跌）", "海外", "国际清算银行 BIS",
+        cb_rate_changes, "幅度单位：基点（0.25% = 25 基点）；日期为生效日；维持不到 7 天或小于 5 基点的变动不算"),
     ("us_cpi_yoy", "美国 CPI 年率（含公布日）", "海外", "金十", lambda: A().macro_usa_cpi_yoy(), ""),
     ("japan_rate", "日本央行利率", "海外", "金十", lambda: A().macro_japan_bank_rate(), "日元套息交易"),
     ("japan_cpi", "日本 CPI 年率", "海外", "金十", lambda: A().macro_japan_cpi_yoy(), ""),
