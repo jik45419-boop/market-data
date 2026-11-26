@@ -286,6 +286,8 @@ HOLDER_COLS = {"END_DATE": "报告期", "NOTICE_DATE": "公告日", "SECURITY_CO
 
 def holders(flt):
     d = em_dc_by_year("RPT_F10_EH_FREEHOLDERS", flt, "END_DATE", cols=",".join(HOLDER_COLS), start=2004)
+    # 來源同一筆（同股票、同報告期、同股東、同持股數）常重複 3～5 次，只留一筆
+    d = d.drop_duplicates(["SECURITY_CODE", "END_DATE", "HOLDER_NAME", "HOLD_NUM"])
     return d.rename(columns=HOLDER_COLS)
 
 
