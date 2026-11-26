@@ -377,6 +377,8 @@ DATASETS = [
     ("cn_repo_fr", "银行间回购定盘利率 FR007／FDR007", "货币流动性", "中国货币网", ("year", "2006",
         lambda y: A().interest_rate_repo_hist_cm(start_date=f"{y}0101", end_date=f"{y}1231"), 1), "DR007 即 FDR007"),
     ("cn_us_bond_yield", "中美国债收益率（2/5/10/30 年）", "货币流动性", "东方财富", lambda: A().bond_zh_us_yield_em(start_date="19900101"), "含中美 10 年利差"),
+    ("cn_bond_curves", "中债收益率曲线（国债、国开债、AAA／AA 企业债、中短期票据、商业银行债）", "货币流动性", "中国债券信息网", ("year", "2006",
+        lambda y: A().bond_china_yield(start_date=f"{y}0101", end_date=f"{y}1231"), 1), "信用利差＝企业债收益率－同期限国债收益率"),
     ("cn_fx_gold_reserve", "外汇储备与黄金储备", "货币流动性", "外汇局（东方财富）", lambda: A().macro_china_fx_gold_em(), "看央行购金"),
     ("cn_bank_financing", "银行理财产品收益率", "货币流动性", "金十", lambda: A().macro_china_bank_financing(), ""),
     ("cn_fx_central_parity", "人民币汇率中间价（各币种）", "货币流动性", "国家外汇管理局", lambda: A().fx_central_parity_safe(), ""),
@@ -417,6 +419,8 @@ DATASETS = [
         lambda d: A().stock_report_fund_hold(symbol="保险持仓", date=_q(d)), 2), ""),
     ("inst_hold_broker", "券商持仓汇总（每季每股）", "国家队社保", "东方财富 主力持仓", ("quarter", "2005-03-31",
         lambda d: A().stock_report_fund_hold(symbol="券商持仓", date=_q(d)), 2), ""),
+    ("holder_count", "上市公司股东户数（每季每股）", "国家队社保", "巨潮资讯", ("quarter", "2010-03-31",
+        lambda d: A().stock_hold_num_cninfo(date=_q(d)), 2), "户数减少＝筹码集中"),
     ("etf_shares_sse", "上交所 ETF 每日份额（看国家队买宽基 ETF）", "国家队社保", "上海证券交易所", ("day", "2012-05-28",
         lambda d: A().fund_etf_scale_sse(date=_q(d)), 3), "全部沪市 ETF；510300、510050、510500 等的份额暴增常被视为国家队进场"),
     # ---------------- 6 資金面
