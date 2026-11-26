@@ -80,8 +80,8 @@ def norm_period(v):
 
 def add_period(df, col=None):
     """在最前面加「期間」欄並由舊到新排序；col＝日期欄（不給就自動找第一個認得出日期的欄）"""
-    if df is None or df.empty:
-        return df
+    if df is None or df.empty or "期間" in df.columns:
+        return df.sort_values("期間", kind="stable").reset_index(drop=True) if df is not None and "期間" in df.columns else df
     if col:
         cols = [col]
     else:       # 名稱像日期的欄位優先（避免把股票代碼當成日期）
