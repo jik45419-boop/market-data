@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import breadth
 import macro
 from common import gunzip_file, gzip_file, notice
 from store import get_store
@@ -27,6 +28,21 @@ def main():
 
     only = {x for x in os.environ.get("ONLY", "").split(",") if x.strip()} or None
     ok, bad = macro.run(only, budget_min=float(os.environ.get("BUDGET_MIN", "300")))
+
+    # 市場寬度：用同一個 Drive 資料夾裡的 A 股日線數據包計算（第一次要下載全部數據包，之後只讀最近 15 個月）
+    if not only or "market_breadth" in only:
+        con = macro.open_db(DB)
+        try:
+            n = breadth.update(store, con, DATA / "packs", log=macro.log,
+                               max_minutes=float(os.environ.get("BREADTH_MIN", "120")))
+            macro.mark(con, "market_breadth", "市场宽度（涨跌停家数、站上均线比例、新高新低、腾落线）", "估值情绪",
+                       "用 A 股日线数据包自行计算", "自算", "沪深主板＋创业板；漲跌停按主板 10%、ST 5%、创业板 2020-08-24 起 20%", True)
+            macro.log(f"市場寬度：新增 {n} 天")
+        except Exception as e:  # noqa: BLE001
+            macro.mark(con, "market_breadth", "市场宽度（涨跌停家数、站上均线比例、新高新低、腾落线）", "估值情绪",
+                       "用 A 股日线数据包自行计算", "自算", "", False, f"{type(e).__name__}: {str(e)[:200]}")
+            macro.log(f"市場寬度失敗：{type(e).__name__} {e}")
+        con.close()
 
     gzip_file(DB, gz)
     store.upload(gz, "macro.db.gz")
