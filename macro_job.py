@@ -59,6 +59,11 @@ def main():
             macro.log(f"新聞情緒失敗：{type(e).__name__} {e}")
         con.close()
 
+    con = macro.open_db(DB)
+    for t, issue, n in macro.quality_report(con):
+        macro.log(f"品質檢查：{t} {issue} {n} 筆")
+    con.close()
+
     gzip_file(DB, gz)
     store.upload(gz, "macro.db.gz")
     out = DATA / "export"

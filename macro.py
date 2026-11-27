@@ -69,7 +69,7 @@ def norm_period(v):
         or re.match(r"^(\d{4})/(\d{1,2})/(\d{1,2})", s) or re.match(r"^(\d{4})(\d{2})(\d{2})$", s)
     if m:
         return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    m = re.match(r"^(\d{4})年第([\d\-]+)季度", s)
+    m = re.match(r"^(\d{4})年?第([\d\-]+)季度", s)          # 「2026年第1-3季度」「2008第1季度」都認得
     if m:
         return f"{m.group(1)}{_CN_Q.get(m.group(2), 'Q' + m.group(2)[-1])}"
     m = re.match(r"^(\d{4})年(\d{1,2})月", s) or re.match(r"^(\d{4})[.\-](\d{1,2})$", s) or re.match(r"^(\d{4})(\d{2})$", s)
@@ -680,6 +680,20 @@ def etf_flows():
     return d[["日期", "基金代码", "品種", "基金份额(亿份)", "单位净值", "估算净申购(亿元)"]]
 
 
+def clean_qvix(d, cal):
+    """波指：去掉非交易日的列（來源偶爾有週日、補班日的列），同一品種同一天重複時留最後一筆"""
+    d = d.copy()
+    dates = d["date"].astype(str).str[:10]
+    d = d[dates.isin(set(cal))]
+    return d.drop_duplicates(["品種", "date"], keep="last").reset_index(drop=True)
+
+
+def qvix_table():
+    d = concat_named([(n, getattr(A(), f)) for n, f in QVIX])
+    d["date"] = d["date"].astype(str).str[:10]
+    return clean_qvix(d, trade_days("2015-01-01"))
+
+
 def us_macro_em():
     d = em_dc("RPT_ECONOMICVALUE_USA", sort="REPORT_DATE")
     d = d[["INDICATOR_NAME", "INDICATOR_ID", "REPORT_DATE", "PUBLISH_DATE", "VALUE", "PRE_VALUE"]]
@@ -813,7 +827,7 @@ DATASETS = [
         lambda: concat_named([(n, (lambda s=s: A().index_zh_daily_sina(symbol=s))) for n, s in CN_IDX]), ""),
     # ---------------- 8 衍生品
     ("qvix", "中国波指（期权隐含波动率，50ETF／300ETF／1000 等）", "衍生品", "期权论坛",
-        lambda: concat_named([(n, getattr(A(), f)) for n, f in QVIX]), "数字越大越恐慌"),
+        lambda: qvix_table(), "数字越大越恐慌；新指数上市前为空；已去掉非交易日与重复列"),
     ("option_stats_sse", "上交所 ETF 期权每日统计（认沽／认购比 PCR、成交、持仓）", "衍生品", "上海证券交易所", ("day", "2015-02-09",
         lambda d: A().option_daily_stats_sse(date=_q(d)), 3), "50ETF 期权 2015-02 上市；PCR 偏高＝避险需求强"),
     ("option_stats_szse", "深交所 ETF 期权每日统计（认沽／认购比 PCR、成交、持仓）", "衍生品", "深圳证券交易所", ("day", "2019-12-23",
@@ -942,12 +956,13 @@ RELEASE_RULES = {
     "cn_money_supply": (1, 15), "cn_social_financing": (1, 15), "cn_new_credit": (1, 15), "cn_rmb_loan": (1, 15),
     "cn_rmb_deposit": (1, 15), "cn_fx_gold_reserve": (1, 8), "cn_bank_financing": (1, 15),
     "industry_indicators": (1, 25), "policy_uncertainty": (1, 10), "japan_cpi": (1, 25),
+    "us_cpi_yoy": (1, 15), "global_macro": (1, 25), "us_macro": (1, 15),
 }
 
 
 def release_date(period, rule):
     """期間（YYYY-MM／YYYYQn／YYYY-MM-DD 代表的那個月）→ 估計公布日 YYYY-MM-DD"""
-    if not period:
+    if not isinstance(period, str) or not period:
         return None
     m = re.match(r"^(\d{4})Q(\d)$", period)
     if m:
@@ -962,6 +977,26 @@ def release_date(period, rule):
     y += (mo - 1) // 12
     mo = (mo - 1) % 12 + 1
     return f"{y}-{mo:02d}-{day:02d}"
+
+
+# 來源本身有「公布日」欄的表：只在落在「期間開始後 200 天內」時才採用（來源偶爾整欄填同一天，例如日本利率）
+SOURCE_RELEASE = {"us_cpi_yoy": "发布日期", "japan_cpi": "发布日期", "global_macro": "发布日期", "us_macro": "发布日"}
+# 金十的預告列（還沒公布、數值是空的）一律不收；這些表只留有數值的列
+NONNULL = {"us_cpi_yoy": "现值", "japan_cpi": "现值", "japan_rate": "现值", "global_macro": "现值", "us_macro": "数值"}
+
+
+def period_start(p):
+    """期間 → 該期間第一天（YYYY-MM-DD）"""
+    if not isinstance(p, str) or not p:
+        return None
+    m = re.match(r"^(\d{4})Q(\d)$", p)
+    if m:
+        return f"{m.group(1)}-{(int(m.group(2)) - 1) * 3 + 1:02d}-01"
+    if re.match(r"^\d{4}-\d{2}-\d{2}", p):
+        return p[:10]
+    if re.match(r"^\d{4}-\d{2}$", p):
+        return p + "-01"
+    return None
 
 
 def add_release(con, sid, df):
@@ -979,6 +1014,19 @@ def add_release(con, sid, df):
     df = df.copy()
     pos = list(df.columns).index("期間") + 1
     est = df["期間"].map(lambda p: release_date(p, RELEASE_RULES[sid]))
+    src = SOURCE_RELEASE.get(sid)
+    if src and src in df.columns:
+        sd = pd.to_datetime(df[src], errors="coerce")
+        st = pd.to_datetime(df["期間"].map(period_start), errors="coerce")
+        ok = sd.notna() & st.notna() & (sd >= st) & (sd <= st + pd.Timedelta(days=200))
+        est = est.where(~ok, sd.dt.strftime("%Y-%m-%d"))
+    if sid == "industry_indicators" and "指标" in df.columns:
+        # 混合頻率：近 400 天資料 ≥100 筆的是日頻（運價、價格指數），當天就看得到；其餘是月頻，套「次月 25 日」
+        dd = pd.to_datetime(df["期間"], errors="coerce")
+        recent = dd >= dd.max() - pd.Timedelta(days=400)
+        daily = df[recent].groupby("指标").size()
+        daily = set(daily[daily >= 100].index)
+        est = est.where(~df["指标"].isin(daily), df["期間"].str[:10])
     fs = df["期間"].map(seen.get)
     df.insert(pos, "公布日(估)", est)
     df.insert(pos + 1, "首次抓到日", fs)
@@ -988,6 +1036,9 @@ def add_release(con, sid, df):
 
 def write_full(con, sid, df):
     df = _drop_dup_cols(_clean(add_period(df)))
+    if sid in NONNULL and NONNULL[sid] in df.columns:
+        df = df[df[NONNULL[sid]].notna()]                 # 還沒公布的預告列
+    df = df.drop_duplicates().reset_index(drop=True)      # 來源偶爾同一天重複列（巴菲特指標、破淨股、日本利率…）
     df = add_release(con, sid, df)
     tmp = f"_new_{sid}"
     con.execute(f'drop table if exists "{tmp}"')
@@ -1029,6 +1080,33 @@ def mark(con, sid, name, cat, src, kind, note, ok, err=None):
 
 
 # ======================================================================== 主流程
+def quality_report(con):
+    """逐表自動檢查：完全重複的列、期間在未來的列。結果寫進 _quality 表，回傳 [(表, 問題, 筆數)]"""
+    con.execute("create table if not exists _quality(tbl text, issue text, rows integer, checked_at text)")
+    con.execute("delete from _quality")
+    now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    out = []
+    tabs = [r[0] for r in con.execute("select name from sqlite_master where type='table' and name not like '\\_%' escape '\\'")]
+    for t in tabs:
+        cols = [r[1] for r in con.execute(f'pragma table_info("{t}")')]
+        allc = ",".join(f'"{c}"' for c in cols)
+        dup = con.execute(f'select coalesce(sum(n - 1), 0) from (select count(*) n from "{t}" group by {allc} having n > 1)').fetchone()[0]
+        if dup:
+            out.append((t, "完全重複的列", int(dup)))
+        if "期間" in cols:
+            nul = con.execute(f'select count(*) from "{t}" where "期間" is null').fetchone()[0]
+            if nul:
+                out.append((t, "期間是空的（日期格式沒認出來）", int(nul)))
+            fut = con.execute(f'select count(*) from "{t}" where "期間" glob "[12][0-9][0-9][0-9]-[0-9][0-9]*" and substr("期間",1,10) > ? '
+                              f'and length("期間") = 10', (today().isoformat(),)).fetchone()[0]
+            fut_m = con.execute(f'select count(*) from "{t}" where length("期間") = 7 and "期間" > ?', (today().isoformat()[:7],)).fetchone()[0]
+            if fut + fut_m:
+                out.append((t, "期間在未來", int(fut + fut_m)))
+    con.executemany("insert into _quality values(?,?,?,?)", [(a, b, c, now) for a, b, c in out])
+    con.commit()
+    return out
+
+
 def out_of_time():
     return _deadline is not None and time.monotonic() > _deadline
 
