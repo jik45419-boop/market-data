@@ -241,6 +241,16 @@ def sw_months(start):
     return sorted(str(x)[:10] for x in d.iloc[:, 0] if str(x)[:10] >= start)
 
 
+def month_starts(start):
+    """每月第一個交易日（查指數成分用）"""
+    out, seen = [], set()
+    for d in trade_days(start):
+        if d[:7] not in seen:
+            seen.add(d[:7])
+            out.append(d)
+    return out
+
+
 def years(start):
     return [str(y) for y in range(int(start), today().year + 1)]
 
@@ -564,6 +574,112 @@ def global_macro():
     return d.rename(columns={"品種": "指标"})
 
 
+CSI_INDUSTRY = (("能源", "000986"), ("原材料", "000987"), ("工业", "000988"), ("可选消费", "000989"), ("主要消费", "000990"),
+                ("医药卫生", "000991"), ("金融地产", "000992"), ("信息技术", "000993"), ("电信业务", "000994"), ("公用事业", "000995"))
+
+
+def csi_industry_daily():
+    end = today().strftime("%Y%m%d")
+    return concat_named([(n, (lambda c=c: A().index_hist_csindex(symbol=c, start_date="20050101", end_date=end)))
+                         for n, c in CSI_INDUSTRY])
+
+
+_bs_on = False
+
+
+def index_members_at(d):
+    """BaoStock：某一天的滬深 300、中證 500、上證 50 成分股"""
+    global _bs_on
+    import baostock as bs
+    import bsapi
+    if not _bs_on:
+        bsapi.login()
+        _bs_on = True
+    out = []
+    for name, fn in (("沪深300", bs.query_hs300_stocks), ("中证500", bs.query_zz500_stocks), ("上证50", bs.query_sz50_stocks)):
+        fields, rows = bsapi.query(fn, date=d)
+        f = {x: i for i, x in enumerate(fields)}
+        out += [{"指数": name, "代码": r[f["code"]], "名称": r[f["code_name"]], "成分更新日": r[f["updateDate"]]} for r in rows]
+    if not out:
+        raise RuntimeError("BaoStock 沒有回傳成分股")
+    return pd.DataFrame(out)
+
+
+def index_changes_from(snap):
+    """成分股快照（_期, 指数, 代码, 名称, 成分更新日）→ 調入／調出紀錄"""
+    out = []
+    for name, g in snap.groupby("指数"):
+        prev = None
+        for d, h in g.groupby("_期", sort=True):
+            cur = dict(zip(h["代码"], h["名称"]))
+            eff = h["成分更新日"].max()
+            if prev is not None:
+                for c in sorted(set(cur) - set(prev)):
+                    out.append({"生效日": eff, "指数": name, "变动": "调入", "代码": c, "名称": cur[c], "查到的月份": d[:7]})
+                for c in sorted(set(prev) - set(cur)):
+                    out.append({"生效日": eff, "指数": name, "变动": "调出", "代码": c, "名称": prev[c], "查到的月份": d[:7]})
+            prev = cur
+    return pd.DataFrame(out, columns=["生效日", "指数", "变动", "代码", "名称", "查到的月份"])
+
+
+def index_changes():
+    con = sqlite3.connect(str(DB))
+    snap = pd.read_sql('select "_期", 指数, 代码, 名称, 成分更新日 from index_members_hist', con)
+    con.close()
+    return index_changes_from(snap)
+
+
+KEY_ETFS = (("510050", "上证50 华夏"), ("510300", "沪深300 华泰柏瑞"), ("510310", "沪深300 易方达"), ("510330", "沪深300 华夏"),
+            ("510500", "中证500 南方"), ("512100", "中证1000 南方"), ("588000", "科创50 华夏"), ("159919", "沪深300 嘉实"),
+            ("159915", "创业板 易方达"), ("159922", "中证500 嘉实"), ("159901", "深证100 易方达"), ("159949", "创业板50 华安"),
+            ("159845", "中证1000 华夏"), ("159952", "创业板 广发"))
+
+
+def _etf_one(code):
+    nav = A().fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
+    nav = pd.DataFrame({"日期": nav.iloc[:, 0].astype(str), "单位净值": pd.to_numeric(nav.iloc[:, 1], errors="coerce")})
+    px = A().fund_etf_hist_sina(symbol=("sh" if code.startswith(("5", "6")) else "sz") + code)
+    px = pd.DataFrame({"日期": px["date"].astype(str), "收盘": pd.to_numeric(px["close"], errors="coerce"),
+                       "成交额": pd.to_numeric(px.get("amount"), errors="coerce")})
+    d = px.merge(nav, on="日期", how="outer").sort_values("日期")
+    d["溢价率%"] = ((d["收盘"] / d["单位净值"] - 1) * 100).round(3)
+    return d
+
+
+def etf_premium():
+    """主要寬基 ETF 每日收盤價、單位淨值、溢價率"""
+    d = concat_named([(f"{c} {n}", (lambda c=c: _etf_one(c))) for c, n in KEY_ETFS])
+    d.insert(1, "基金代码", d["品種"].str[:6])
+    return d
+
+
+def etf_flows():
+    """主要寬基 ETF 每日估算淨申購（億元）＝份額變化 × 當天單位淨值；用上交所／深交所份額表和 etf_premium 的淨值"""
+    con = sqlite3.connect(str(DB))
+    have = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
+    sh = []
+    if "etf_shares_sse" in have:
+        sh.append(pd.read_sql('select substr(统计日期,1,10) 日期, 基金代码, 基金份额 from etf_shares_sse', con))
+    if "etf_shares_szse" in have:
+        sh.append(pd.read_sql('select 日期, 基金代码, 基金份额 from etf_shares_szse', con))
+    nav = pd.read_sql('select 日期, 基金代码, 品種, 单位净值 from etf_premium', con) if "etf_premium" in have else None
+    con.close()
+    if not sh or nav is None:
+        raise RuntimeError("還沒有 ETF 份額或淨值資料")
+    sh = pd.concat(sh, ignore_index=True)
+    sh["基金代码"] = sh["基金代码"].astype(str)
+    sh = sh[sh["基金代码"].isin([c for c, _ in KEY_ETFS])].drop_duplicates(["基金代码", "日期"]).sort_values(["基金代码", "日期"])
+    d = sh.merge(nav, on=["日期", "基金代码"], how="left")
+    cal = {dd: i for i, dd in enumerate(trade_days("2004-01-01"))}
+    d["_i"] = d["日期"].map(cal)
+    d["份额变化"] = d.groupby("基金代码")["基金份额"].diff()
+    gap = d.groupby("基金代码")["_i"].diff()
+    d.loc[gap != 1, "份额变化"] = None          # 前一筆不是前一個交易日（中間有缺）：不算，避免把好幾天的變化算成一天
+    d["估算净申购(亿元)"] = (d["份额变化"] * d["单位净值"] / 1e8).round(3)
+    d["基金份额(亿份)"] = (d["基金份额"] / 1e8).round(3)
+    return d[["日期", "基金代码", "品種", "基金份额(亿份)", "单位净值", "估算净申购(亿元)"]]
+
+
 def us_macro_em():
     d = em_dc("RPT_ECONOMICVALUE_USA", sort="REPORT_DATE")
     d = d[["INDICATOR_NAME", "INDICATOR_ID", "REPORT_DATE", "PUBLISH_DATE", "VALUE", "PRE_VALUE"]]
@@ -656,8 +772,14 @@ DATASETS = [
         lambda d: A().stock_report_fund_hold(symbol="券商持仓", date=_q(d)), 2), ""),
     ("holder_count", "上市公司股东户数（每季每股）", "国家队社保", "巨潮资讯", ("quarter", "2010-03-31",
         lambda d: A().stock_hold_num_cninfo(date=_q(d)), 2), "户数减少＝筹码集中"),
+    ("index_members_hist", "沪深300／中证500／上证50 每月成分股快照", "国家队社保", "BaoStock", ("mstart", "2006-01-01",
+        index_members_at, 1), "每月第一个交易日的成分股；用来算调入调出"),
     ("etf_shares_sse", "上交所 ETF 每日份额（看国家队买宽基 ETF）", "国家队社保", "上海证券交易所", ("day", "2012-05-28",
         lambda d: A().fund_etf_scale_sse(date=_q(d)), 3), "全部沪市 ETF；510300、510050、510500 等的份额暴增常被视为国家队进场"),
+    ("etf_premium", "主要宽基 ETF 每日收盘价、单位净值、溢价率（14 档）", "国家队社保", "天天基金（净值）、新浪（价格）", etf_premium,
+        "溢价率＝收盘价÷单位净值－1；大幅溢价代表场内抢筹"),
+    ("etf_flows", "主要宽基 ETF 每日估算净申购（亿元）", "国家队社保", "由 ETF 份额 × 单位净值计算", lambda: etf_flows(),
+        "份额变化 × 当天单位净值；份额表补得越完整，这张表越完整"),
     ("etf_shares_szse", "深交所 ETF 每日份额（规模前 40 大股票型 ETF，含 159919、159915 等宽基）", "国家队社保", "深圳证券交易所",
         ("quarter", "2016-03-31", szse_etf_quarter, 1), "来源约从 2016 年起；份额单位：份"),
     # ---------------- 6 資金面
@@ -723,6 +845,8 @@ DATASETS = [
     # ---------------- 10 產業
     ("industry_indicators", "行业指标（运价、钢铁、有色、汽车、手机出货、货运、用电、地产销售、保费等）", "产业", "东方财富 行业指数",
         industry_indicators, "长表：一列一个指标一期；Excel 里转成一栏一个指标"),
+    ("csi_industry_daily", "中证全指一级行业指数日线（10 个行业，含市盈率）", "产业", "中证指数公司", csi_industry_daily,
+        "申万日线在 GitHub 上连不到时的替代；2005 年起"),
     ("sw_industry_daily", "申万一级行业指数日线（31 个行业）", "产业", "申万宏源", lambda: sw_industry_daily(), "看行业轮动、强弱"),
     ("sw_industry_monthly", "申万行业月报（市盈率、市净率、股息率、涨跌幅）", "产业", "申万宏源", ("month", "2000-01-01",
         lambda d: A().index_analysis_monthly_sw(symbol="一级行业", date=_q(d)), 2), "每月最后一个交易日"),
@@ -732,6 +856,8 @@ DATASETS = [
     # ---------------- 11 政策
     ("policy_uncertainty", "中国经济政策不确定性指数（EPU）与贸易政策不确定性（TPU）", "政策事件", "policyuncertainty.com",
         epu, "数字越高代表政策越不确定；学术界常用"),
+    ("index_changes", "指数成分股调入／调出纪录（沪深300、中证500、上证50）", "国家队社保", "由每月成分股快照计算",
+        lambda: index_changes(), "生效日取 BaoStock 的成分更新日；被动资金会在生效日前后被迫买卖"),
     # ---------------- 12 政策與大事件（放最後：要用上面抓到的上證指數計算市場反應）
     ("events", "历年重要政策与大事件（含上证当天及之后 5/20/60 日涨跌）", "政策事件", "人工整理 events.csv", lambda: events_table(),
         "可直接編輯 events.csv 增補；漲跌以事件前一交易日收盤為基準"),
@@ -927,7 +1053,8 @@ def run_full(con, ds):
 
 def run_periodic(con, ds):
     sid, name, cat, src, (unit, start, fn, refresh), note = ds
-    plist = {"quarter": quarter_ends, "day": trade_days, "year": years, "month": sw_months}[unit](start)
+    plist = {"quarter": quarter_ends, "day": trade_days, "year": years, "month": sw_months,
+             "mstart": month_starts}[unit](start)
     done = {r[0] for r in con.execute("select period from _progress where id=?", (sid,))}
     recent = set(plist[-refresh:]) if refresh else set()
     todo = [p for p in plist if p not in done or p in recent]
@@ -959,10 +1086,13 @@ def run_periodic(con, ds):
         time.sleep(0.6)
     left = len([p for p in plist if p not in {r[0] for r in con.execute("select period from _progress where id=?", (sid,))}])
     extra = f"；還有 {left} 期沒抓，下次繼續" if left else ""
-    mark(con, sid, name, cat, src, f"逐{ {'quarter': '季', 'day': '日', 'year': '年', 'month': '月'}[unit] }", note + extra if note else extra.lstrip("；"),
+    mark(con, sid, name, cat, src, f"逐{ {'quarter': '季', 'day': '日', 'year': '年', 'month': '月', 'mstart': '月'}[unit] }", note + extra if note else extra.lstrip("；"),
          n_fail == 0, err)
     log(f"{'✓' if n_fail == 0 else '△'} {sid} {name}：本次 {n_ok} 期成功、{n_fail} 期失敗{extra}")
     return n_fail == 0
+
+
+POST_IDS = {"index_changes", "etf_flows"}
 
 
 def run(only=None, budget_min=BUDGET_MIN, db=DB):
@@ -971,7 +1101,8 @@ def run(only=None, budget_min=BUDGET_MIN, db=DB):
     con = open_db(db)
     ok = bad = 0
     sel = [d for d in DATASETS if not only or d[0] in only]
-    full = [d for d in sel if callable(d[4])]
+    post = [d for d in sel if d[0] in POST_IDS]                 # 要用到逐期數據的，最後才算
+    full = [d for d in sel if callable(d[4]) and d[0] not in POST_IDS]
     per = [d for d in sel if not callable(d[4])]
     for d in full:            # 一般數據都很快，先全部做完
         ok, bad = (ok + 1, bad) if run_full(con, d) else (ok, bad + 1)
@@ -980,6 +1111,8 @@ def run(only=None, budget_min=BUDGET_MIN, db=DB):
             log(f"時間到，{d[0]} 留到下次")
             continue
         ok, bad = (ok + 1, bad) if run_periodic(con, d) else (ok, bad + 1)
+    for d in post:
+        ok, bad = (ok + 1, bad) if run_full(con, d) else (ok, bad + 1)
     con.execute("vacuum")
     con.close()
     return ok, bad
