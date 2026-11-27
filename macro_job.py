@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import breadth
+import news_sentiment
 import macro
 from common import gunzip_file, gzip_file, notice
 from store import get_store
@@ -42,6 +43,20 @@ def main():
             macro.mark(con, "market_breadth", "市场宽度（涨跌停家数、站上均线比例、新高新低、腾落线）", "估值情绪",
                        "用 A 股日线数据包自行计算", "自算", "", False, f"{type(e).__name__}: {str(e)[:200]}")
             macro.log(f"市場寬度失敗：{type(e).__name__} {e}")
+        con.close()
+
+    # 新聞情緒：用 news 資料夾裡 news_live.py 存的每日新聞計算
+    if not only or "news_sentiment" in only:
+        con = macro.open_db(DB)
+        name = "新闻情绪（利多／利空则数、情绪指数、增持减持回购公告数）"
+        try:
+            news_sentiment.update(store, con, DATA / "news", log=macro.log)
+            macro.mark(con, "news_sentiment", name, "估值情绪", "用 news_live 存的每日新闻自行计算", "自算",
+                       "关键字判断，只是粗略的情绪温度计；2026-11 开始有新闻存档", True)
+        except Exception as e:  # noqa: BLE001
+            macro.mark(con, "news_sentiment", name, "估值情绪", "用 news_live 存的每日新闻自行计算", "自算", "", False,
+                       f"{type(e).__name__}: {str(e)[:200]}")
+            macro.log(f"新聞情緒失敗：{type(e).__name__} {e}")
         con.close()
 
     gzip_file(DB, gz)
