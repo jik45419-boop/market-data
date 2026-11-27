@@ -464,6 +464,106 @@ def cb_rate_changes():
     return ch
 
 
+NYFED = "https://markets.newyorkfed.org/api"
+
+
+def us_initial_claims():
+    """美國勞工部 各州每週失業金申請（ar539）→ 全國合計：初領、續領（未季調）"""
+    d = pd.read_csv(io.StringIO(http_get("https://oui.doleta.gov/unemploy/csv/ar539.csv", timeout=120).text),
+                    usecols=["st", "rptdate", "c3", "c8"])
+    d["c3"] = pd.to_numeric(d["c3"], errors="coerce")
+    d["c8"] = pd.to_numeric(d["c8"], errors="coerce")
+    g = d.groupby("rptdate").agg(初领失业金人数=("c3", "sum"), 续领失业金人数=("c8", "sum"), 州数=("st", "nunique"))
+    return g.reset_index().rename(columns={"rptdate": "日期"})
+
+
+def us_rrp():
+    """紐約聯儲 隔夜逆回購（ON RRP）每日接受金額"""
+    js = http_get(f"{NYFED}/rp/reverserepo/propositions/search.json", {"startDate": "2013-09-01"}, timeout=120).json()
+    rows = [{"日期": o["operationDate"], "接受金额(亿美元)": float(o.get("totalAmtAccepted") or 0) / 1e8,
+             "参与机构数": o.get("participatingCpty")} for o in js["repo"]["operations"]]
+    d = pd.DataFrame(rows)
+    return d.groupby("日期", as_index=False).agg({"接受金额(亿美元)": "sum", "参与机构数": "max"})
+
+
+def us_soma():
+    """紐約聯儲 SOMA 持有證券（聯準會資產負債表的主體，每週）"""
+    js = http_get(f"{NYFED}/soma/summary.json", timeout=120).json()
+    d = pd.DataFrame(js["soma"]["summary"])
+    for c in d.columns:
+        if c != "asOfDate":
+            d[c] = pd.to_numeric(d[c], errors="coerce") / 1e8
+    return d.rename(columns={"asOfDate": "日期", "total": "合计(亿美元)", "bills": "国库券", "notesbonds": "中长期国债",
+                             "tips": "抗通胀债TIPS", "mbs": "房贷抵押债MBS", "cmbs": "商业房贷债CMBS", "agencies": "机构债",
+                             "frn": "浮动利率债", "tipsInflationCompensation": "TIPS通胀补偿"})
+
+
+def us_nyfed_rates():
+    """紐約聯儲 有效聯邦基金利率 EFFR（2000 起）、SOFR（2018 起）"""
+    out = []
+    for path, start in (("unsecured/effr", "2000-07-01"), ("secured/sofr", "2018-04-01")):
+        js = http_get(f"{NYFED}/rates/{path}/search.json", {"startDate": start}, timeout=120).json()
+        for r in js["refRates"]:
+            out.append({"日期": r["effectiveDate"], "利率": r["type"], "数值%": r.get("percentRate"),
+                        "目标下限%": r.get("targetRateFrom"), "目标上限%": r.get("targetRateTo"),
+                        "成交量(十亿美元)": r.get("volumeInBillions")})
+    return pd.DataFrame(out)
+
+
+def us_tga():
+    """美國財政部 每日報表（DTS）TGA 帳戶餘額（百萬美元）"""
+    url = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/dts/operating_cash_balance"
+    types = ("Treasury General Account (TGA) Closing Balance", "Treasury General Account (TGA) Opening Balance",
+             "Treasury General Account (TGA)", "Federal Reserve Account")      # 帳戶名稱歷年改過三次
+    rows, page = [], 1
+    while True:
+        p = {"fields": "record_date,account_type,open_today_bal,close_today_bal", "sort": "record_date",
+             "page[size]": "10000", "page[number]": str(page)}       # 帳戶名稱有括號，伺服器端篩選會漏，改成自己篩
+        js = http_get(url, p, {"Accept": "application/json"}, timeout=120).json()
+        rows += js.get("data") or []
+        if page >= (js.get("meta") or {}).get("total-pages", 1):
+            break
+        page += 1
+    d = pd.DataFrame(rows)
+    d = d[d["account_type"].isin(types)]
+    for c in ("open_today_bal", "close_today_bal"):
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    out = {}
+    for r in d.itertuples():          # 收盤餘額優先；2021-10 改版後只有「隔天的開盤餘額」，用開盤餘額
+        v = r.close_today_bal if r.close_today_bal == r.close_today_bal else r.open_today_bal
+        if v == v and (r.record_date not in out or "Opening" not in r.account_type):
+            out[r.record_date] = v
+    return pd.DataFrame({"日期": list(out), "TGA余额(百万美元)": list(out.values())})
+
+
+def cboe_vix():
+    d = pd.read_csv(io.StringIO(http_get("https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv",
+                                         timeout=60).text))
+    d["DATE"] = pd.to_datetime(d["DATE"], format="%m/%d/%Y").dt.strftime("%Y-%m-%d")
+    return d.rename(columns={"DATE": "日期"})
+
+
+GLOBAL_MACRO = (
+    ("德国 CPI 年率", "macro_germany_cpi_yoy"), ("德国 GDP", "macro_germany_gdp"), ("德国 IFO 商业景气", "macro_germany_ifo"),
+    ("德国 ZEW 经济景气", "macro_germany_zew"), ("德国 零售销售月率", "macro_germany_retail_sales_mom"),
+    ("德国 贸易帐", "macro_germany_trade_adjusted"),
+    ("英国 CPI 年率", "macro_uk_cpi_yoy"), ("英国 核心 CPI 年率", "macro_uk_core_cpi_yoy"), ("英国 GDP 季率", "macro_uk_gdp_qoq"),
+    ("英国 失业率", "macro_uk_unemployment_rate"), ("英国 零售销售年率", "macro_uk_retail_sales_yoy"),
+    ("英国 Halifax 房价年率", "macro_uk_halifax_yoy"), ("英国 贸易帐", "macro_uk_trade"),
+    ("日本 核心 CPI 年率", "macro_japan_core_cpi_yoy"), ("日本 失业率", "macro_japan_unemployment_rate"),
+    ("日本 领先指标", "macro_japan_leading_indicator"),
+    ("加拿大 CPI 年率", "macro_canada_cpi_yoy"), ("加拿大 核心 CPI 年率", "macro_canada_core_cpi_yoy"),
+    ("加拿大 GDP 月率", "macro_canada_gdp_mom"), ("加拿大 失业率", "macro_canada_unemployment_rate"),
+    ("澳洲 CPI 年率", "macro_australia_cpi_yoy"), ("澳洲 失业率", "macro_australia_unemployment_rate"),
+)
+
+
+def global_macro():
+    """歐、英、日、加、澳主要總經（金十，含公布日；「时间」是公布月份）"""
+    d = concat_named([(n, getattr(A(), f)) for n, f in GLOBAL_MACRO])
+    return d.rename(columns={"品種": "指标"})
+
+
 def us_macro_em():
     d = em_dc("RPT_ECONOMICVALUE_USA", sort="REPORT_DATE")
     d = d[["INDICATOR_NAME", "INDICATOR_ID", "REPORT_DATE", "PUBLISH_DATE", "VALUE", "PRE_VALUE"]]
@@ -602,11 +702,19 @@ DATASETS = [
     ("us_macro", "美国总经（CPI、核心 CPI、PPI、非农、失业率、ISM、零售、利率决议等 24 项）", "海外", "东方财富", us_macro_em, "长表：一列一个指标一期"),
     ("fred", "美国金融／流动性（PCE、初请、美联储资产负债表、TGA、逆回购、VIX、美债、美元、比特币等）", "海外", "FRED 圣路易斯联储",
         lambda: fred(list(FRED_IDS)), "长表：series 是 FRED 代码，中文名称见 Excel 目录"),
+    ("us_initial_claims", "美国初领／续领失业金人数（每周，未季调）", "海外", "美国劳工部", us_initial_claims, "各州合计；1984 年起"),
+    ("us_rrp", "美联储隔夜逆回购（ON RRP）余额", "海外", "纽约联储", us_rrp, "2013 年起；余额大＝市场资金多到没地方放"),
+    ("us_fed_soma", "美联储持有证券（SOMA，资产负债表主体，每周）", "海外", "纽约联储", us_soma, "2003 年起；看 QE／QT"),
+    ("us_tga", "美国财政部 TGA 账户余额（每日）", "海外", "美国财政部", us_tga, "余额上升＝从市场抽走流动性"),
+    ("us_policy_rates_daily", "美国有效联邦基金利率 EFFR、SOFR（每日）", "海外", "纽约联储", us_nyfed_rates, ""),
+    ("vix", "VIX 恐慌指数（日线）", "海外", "芝加哥期权交易所 CBOE", cboe_vix, "1990 年起"),
     ("dxy", "美元指数 DXY", "海外", "东方财富", lambda: em_kline("100.UDI", "美元指数"), ""),
     ("cb_policy_rates", "主要国家央行政策利率（月底，18 国／地区：美、欧、英、日、中、台、韩、港等）", "海外", "国际清算银行 BIS；台湾：中央银行开放资料",
         cb_rates_monthly, "1990 年起；一栏一个国家"),
     ("cb_rate_changes", "各国央行每一次升息／降息纪录（含上证、标普之后 20 日涨跌）", "海外", "国际清算银行 BIS",
         cb_rate_changes, "幅度单位：基点（0.25% = 25 基点）；日期为生效日；维持不到 7 天或小于 5 基点的变动不算"),
+    ("global_macro", "欧洲、英国、日本、加拿大、澳洲主要总经（CPI、GDP、IFO、ZEW、失业率、零售、房价等 22 项）", "海外", "金十",
+        global_macro, "长表；有发布日期；没有欧元区整体，用德国代表"),
     ("us_cpi_yoy", "美国 CPI 年率（含公布日）", "海外", "金十", lambda: A().macro_usa_cpi_yoy(), ""),
     ("japan_rate", "日本央行利率", "海外", "金十", lambda: A().macro_japan_bank_rate(), "日元套息交易"),
     ("japan_cpi", "日本 CPI 年率", "海外", "金十", lambda: A().macro_japan_cpi_yoy(), ""),
@@ -909,6 +1017,8 @@ def export(db, outdir, max_rows=300_000):
             df = pd.read_sql(f'select * from "{sid}"', con)
             if sid == "industry_indicators":
                 df = df.pivot_table(index="期間", columns="指标", values="数值").reset_index()
+            elif sid == "global_macro":
+                df = df.pivot_table(index="发布日期", columns="指标", values="现值", aggfunc="last").reset_index()
             elif sid == "policy_uncertainty":
                 df = df.pivot_table(index="期間", columns="指数", values="数值").reset_index()
             if sid in ("fred", "us_macro"):          # 長表轉寬表，一欄一個指標
