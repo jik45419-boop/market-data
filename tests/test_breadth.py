@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """市場寬度：用假的數據包驗證漲跌停判斷、均線、新高新低、騰落線、分兩次增量計算結果一致"""
+import os
 import sqlite3
 import sys
 import tempfile
@@ -136,3 +137,15 @@ a = con.execute("select * from market_breadth order by 期間").fetchall()
 b = con2.execute("select * from market_breadth order by 期間").fetchall()
 assert a == b, [(x, y) for x, y in zip(a, b) if x != y][:2]
 print(f"市場寬度測試通過：{len(a)} 天；最後一天 {a[-1][:6]}")
+
+# 最新的包在計算途中被換成新檔名（行情流程同時在更新）：要能重新列檔案找到新檔，而且結果不變
+store3 = LocalStore(tmp / "drive3")
+for f in ("astock_2020-01_2020-06.db.gz", "astock_2020-07_2021-03.db.gz"):
+    shutil.copy(tmp / "drive" / f, tmp / "drive3")
+store3.files = {n: tmp / "drive3" / n for n in os.listdir(tmp / "drive3")}
+os.rename(tmp / "drive3" / "astock_2020-07_2021-03.db.gz", tmp / "drive3" / "astock_2020-07_2021-04.db.gz")
+con3 = sqlite3.connect(tmp / "c.db")
+breadth.update(store3, con3, tmp / "work", log=lambda *_: None)
+c3 = con3.execute("select * from market_breadth order by 期間").fetchall()
+assert c3 == a, "換檔名後結果不同"
+print("最新包中途換檔名：通過")

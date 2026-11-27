@@ -152,7 +152,7 @@ def fred(ids):
         except Exception as e:  # noqa: BLE001
             bad.append(sid)
             log(f"  FRED {sid} 失敗：{type(e).__name__}")
-            if len(bad) >= 5 and not out:
+            if len(bad) >= 2 and not out:      # GitHub 主機常連不到 FRED：前 2 個失敗就放棄，下次再試
                 raise
             continue
         d = pd.read_csv(io.StringIO(r.text))
@@ -196,6 +196,8 @@ def concat_named(items):
         if d is None or len(d) == 0:
             bad.append(name)
             log(f"  {name} 失敗：{type(err).__name__ if d is None else '沒有資料'}")
+            if len(bad) >= 3 and not out:      # 前 3 個都失敗：來源大概整個連不上，不要再浪費時間
+                raise RuntimeError(f"前 {len(bad)} 個品種都失敗，來源可能連不上：{type(err).__name__ if d is None else '沒有資料'}")
             continue
         d = d.copy()
         d.insert(0, "品種", name)
