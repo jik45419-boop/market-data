@@ -61,4 +61,15 @@ con.execute("create table bad2(期間 text, v real)")
 con.executemany("insert into bad2 values(?,?)", [(None, 1), ("2026-01-01", 2)])
 con.commit()
 assert ("bad2", "期間是空的（日期格式沒認出來）", 1) in macro.quality_report(con)
+# 8 逐期資料：來源沒資料的年份（akshare 丟 TypeError）要當成空的、標成完成，不要永遠重試
+def _src(y):
+    if int(y) < 2010:
+        raise TypeError("no data")
+    return pd.DataFrame({"日期": [f"{y}-06-01"], "v": [1]})
+
+
+ds = ("t_year", "測試", "分類", "來源", ("year", "2008", _src, 1), "")
+macro.run_periodic(con, ds)
+done = {r[0] for r in con.execute("select period from _progress where id='t_year'")}
+assert {"2008", "2009", "2010"} <= done, done
 print("資料品質測試通過")

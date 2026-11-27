@@ -38,7 +38,8 @@ def main():
                                max_minutes=float(os.environ.get("BREADTH_MIN", "120")))
             macro.mark(con, "market_breadth", "市场宽度（涨跌停家数、站上均线比例、新高新低、腾落线）", "估值情绪",
                        "用 A 股日线数据包自行计算", "自算", "沪深主板＋创业板；漲跌停按主板 10%、ST 5%、创业板 2020-08-24 起 20%", True)
-            macro.log(f"市場寬度：新增 {n} 天")
+            last, cnt = con.execute('select max("期間"), count(*) from market_breadth').fetchone()
+            macro.log(f"市場寬度：新增 {n} 天；資料庫最新日期 {last}，共 {cnt} 天")
         except Exception as e:  # noqa: BLE001
             macro.mark(con, "market_breadth", "市场宽度（涨跌停家数、站上均线比例、新高新低、腾落线）", "估值情绪",
                        "用 A 股日线数据包自行计算", "自算", "", False, f"{type(e).__name__}: {str(e)[:200]}")

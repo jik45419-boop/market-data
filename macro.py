@@ -1144,7 +1144,10 @@ def run_periodic(con, ds):
         if out_of_time():
             break
         try:
-            df = fn(p)
+            try:
+                df = fn(p)
+            except TypeError:       # akshare 遇到「這一期來源沒有資料」會丟 TypeError（例如 2005～2009 年的解禁），當作空的
+                df = None
             rows = 0 if df is None else len(df)
             if rows:
                 write_period(con, sid, p, df)
