@@ -72,4 +72,19 @@ ds = ("t_year", "測試", "分類", "來源", ("year", "2008", _src, 1), "")
 macro.run_periodic(con, ds)
 done = {r[0] for r in con.execute("select period from _progress where id='t_year'")}
 assert {"2008", "2009", "2010"} <= done, done
+# 9 ETF：份額折算日不算淨申購；價格與淨值差距過大的溢價率不採用
+macro.trade_days = lambda start: ["2024-11-25", "2024-11-26", "2024-11-27", "2024-11-28", "2024-11-29"]
+c2 = sqlite3.connect(tmp / "etf.db")
+c2.execute("create table etf_shares_sse(统计日期 text, 基金代码 text, 基金份额 real)")
+c2.executemany("insert into etf_shares_sse values(?,?,?)", [("2024-11-25", "510500", 100e8), ("2024-11-26", "510500", 110e8),
+                                                           ("2024-11-27", "510500", 28e8), ("2024-11-28", "510500", 28e8)])
+c2.execute("create table etf_premium(日期 text, 基金代码 text, 品種 text, 单位净值 real)")
+c2.executemany("insert into etf_premium values(?,?,?,?)", [("2024-11-25", "510500", "x", 2.0), ("2024-11-26", "510500", "x", 2.0),
+                                                           ("2024-11-27", "510500", "x", 2.0 * 3.5714), ("2024-11-28", "510500", "x", 2.0 * 3.5714)])
+c2.commit(); c2.close()
+macro.DB = tmp / "etf.db"
+fl = macro.etf_flows().set_index("日期")
+assert fl.loc["2024-11-26", "估算净申购(亿元)"] == 20.0, fl            # 份額 +10 億份 × 淨值 2
+assert pd.isna(fl.loc["2024-11-27", "估算净申购(亿元)"]) and bool(fl.loc["2024-11-27", "份额折算"]), fl   # 折算日
+assert abs(fl.loc["2024-11-28", "估算净申购(亿元)"]) < 1e-6                                              # 折算後正常
 print("資料品質測試通過")
