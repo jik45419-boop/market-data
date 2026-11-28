@@ -209,6 +209,17 @@ def concat_named(items):
 
 
 # ======================================================================== 逐期抓的期間清單
+def quarter_ends_cur(start):
+    """已結束的每個季末日，再加上「當季」的季末日（還沒到的也算，讓當季資料每次重抓）"""
+    out = quarter_ends(start)
+    t = today()
+    m = ((t.month - 1) // 3 + 1) * 3
+    cur = f"{t.year}-{m:02d}-{'30' if m in (6, 9) else '31'}"
+    if cur not in out:
+        out.append(cur)
+    return out
+
+
 def quarter_ends(start):
     y, out = int(start[:4]), []
     t = today()
@@ -272,7 +283,7 @@ CN_FUT = (("黄金 AU", "AU0"), ("白银 AG", "AG0"), ("原油 SC", "SC0"), ("�
           ("上证50股指 IH", "IH0"), ("中证500股指 IC", "IC0"), ("中证1000股指 IM", "IM0"), ("10年国债 T", "T0"))
 FOREIGN_FUT = (("COMEX 黄金", "GC"), ("COMEX 白银", "SI"), ("COMEX 铜", "HG"), ("NYMEX WTI 原油", "CL"),
                ("布伦特原油", "OIL"), ("NYMEX 天然气", "NG"), ("富时中国 A50", "CHA50CFD"), ("LME 铜", "CAD"),
-               ("CBOT 大豆", "S"), ("日经225", "NKD"))
+               ("CBOT 大豆", "S"))          # 日經 225（NKD）來源 2019-05 後停更，已拿掉
 GLOBAL_IDX = (("标普500", lambda: A().index_us_daily_sina(symbol=".INX")),
               ("纳斯达克", lambda: A().index_us_daily_sina(symbol=".IXIC")),
               ("道琼斯", lambda: A().index_us_daily_sina(symbol=".DJI")),
@@ -376,13 +387,19 @@ def szse_size(code, start, end):
     return rows
 
 
-def szse_etf_quarter(qend):
-    """一季：前 40 大股票型 ETF 的每日份額（份）"""
+def quarter_window(qend, now=None):
+    """季末日 → (該季第一天, 查詢截止日)；當季還沒結束時截止日是今天"""
     y, mo = int(qend[:4]), int(qend[5:7])
-    qstart = f"{y}-{mo - 2:02d}-01"
+    start = f"{y}-{((mo - 1) // 3) * 3 + 1:02d}-01"
+    return start, min(qend, (now or today()).isoformat())
+
+
+def szse_etf_quarter(qend):
+    """一季（含還沒結束的當季）：前 40 大股票型 ETF 的每日份額（份）"""
+    qstart, qstop = quarter_window(qend)
     out = []
     for code in szse_top_etfs():
-        for r in szse_size(code, qstart, qend):
+        for r in szse_size(code, qstart, qstop):
             out.append({"日期": r["size_date"], "基金代码": r["fund_code"], "基金简称": r["security_short_name"],
                         "基金份额": float(str(r["current_size"]).replace(",", "")) * 1e4})
         time.sleep(0.3)
@@ -490,10 +507,9 @@ def us_initial_claims():
 def us_rrp():
     """紐約聯儲 隔夜逆回購（ON RRP）每日接受金額"""
     js = http_get(f"{NYFED}/rp/reverserepo/propositions/search.json", {"startDate": "2013-09-01"}, timeout=120).json()
-    rows = [{"日期": o["operationDate"], "接受金额(亿美元)": float(o.get("totalAmtAccepted") or 0) / 1e8,
-             "参与机构数": o.get("participatingCpty")} for o in js["repo"]["operations"]]
-    d = pd.DataFrame(rows)
-    return d.groupby("日期", as_index=False).agg({"接受金额(亿美元)": "sum", "参与机构数": "max"})
+    rows = [{"日期": o["operationDate"], "接受金额(亿美元)": float(o.get("totalAmtAccepted") or 0) / 1e8}
+            for o in js["repo"]["operations"]]
+    return pd.DataFrame(rows).groupby("日期", as_index=False)["接受金额(亿美元)"].sum()
 
 
 def us_soma():
@@ -580,8 +596,7 @@ CSI_INDUSTRY = (("能源", "000986"), ("原材料", "000987"), ("工业", "00098
 
 def csi_industry_daily():
     end = today().strftime("%Y%m%d")
-    return concat_named([(n, (lambda c=c: A().index_hist_csindex(symbol=c, start_date="20050101", end_date=end)))
-                         for n, c in CSI_INDUSTRY])
+    return concat_named([(n, (lambda c=c: csindex_hist(c))) for n, c in CSI_INDUSTRY])
 
 
 _bs_on = False
@@ -704,6 +719,35 @@ def qvix_table():
     return clean_qvix(d, trade_days("2015-01-01"))
 
 
+CSI_SOURCE = {"中证全指": "000985", "中证红利": "000922"}
+
+
+def trading_only(d, col, cal):
+    """去掉非交易日的列（中證指數公司的資料偶爾有週末或休市日的列，例如 2005-01-01、2018-06-18）"""
+    return d[d[col].astype(str).str[:10].isin(set(cal))].reset_index(drop=True)
+
+
+def csindex_hist(code):
+    d = A().index_hist_csindex(symbol=code, start_date="20050101", end_date=today().strftime("%Y%m%d"))
+    return trading_only(d, "日期", trade_days("2004-12-01"))
+
+
+def _csindex_daily(code):
+    d = csindex_hist(code)
+    return pd.DataFrame({"date": d["日期"].astype(str).str[:10], "open": d["开盘"], "high": d["最高"],
+                         "low": d["最低"], "close": d["收盘"]})
+
+
+def cn_index_daily():
+    items = []
+    for n, s_ in CN_IDX:
+        if n in CSI_SOURCE:
+            items.append((n, (lambda c=CSI_SOURCE[n]: _csindex_daily(c))))
+        else:
+            items.append((n, (lambda s=s_: A().index_zh_daily_sina(symbol=s))))
+    return concat_named(items)
+
+
 def us_macro_em():
     d = em_dc("RPT_ECONOMICVALUE_USA", sort="REPORT_DATE")
     d = d[["INDICATOR_NAME", "INDICATOR_ID", "REPORT_DATE", "PUBLISH_DATE", "VALUE", "PRE_VALUE"]]
@@ -805,7 +849,7 @@ DATASETS = [
     ("etf_flows", "主要宽基 ETF 每日估算净申购（亿元）", "国家队社保", "由 ETF 份额 × 单位净值计算", lambda: etf_flows(),
         "份额变化 × 当天单位净值；份额表补得越完整，这张表越完整"),
     ("etf_shares_szse", "深交所 ETF 每日份额（规模前 40 大股票型 ETF，含 159919、159915 等宽基）", "国家队社保", "深圳证券交易所",
-        ("quarter", "2016-03-31", szse_etf_quarter, 1), "来源约从 2016 年起；份额单位：份"),
+        ("quarter+", "2016-03-31", szse_etf_quarter, 2), "来源约从 2016 年起；份额单位：份；当季每次重抓"),
     # ---------------- 6 資金面
     ("margin_sse", "沪市融资融券", "资金面", "上交所（金十）", lambda: A().stock_margin_sse_js(), ""),
     ("margin_szse", "深市融资融券", "资金面", "深交所（金十）", lambda: A().stock_margin_szse_js(), ""),
@@ -833,8 +877,8 @@ DATASETS = [
     ("congestion", "大盘拥挤度", "估值情绪", "乐咕乐股", lambda: A().stock_a_congestion_lg(), ""),
     ("high_low", "创新高／新低家数", "估值情绪", "乐咕乐股", lambda: A().stock_a_high_low_statistics(symbol="all"), "来源只提供最近约 2 年"),
     ("cb_index", "集思录可转债等权指数", "估值情绪", "集思录", lambda: A().bond_cb_index_jsl(), "来源只提供最近约 1 年"),
-    ("cn_index_daily", "A 股主要指数日线", "估值情绪", "新浪",
-        lambda: concat_named([(n, (lambda s=s: A().index_zh_daily_sina(symbol=s))) for n, s in CN_IDX]), ""),
+    ("cn_index_daily", "A 股主要指数日线", "估值情绪", "新浪；中证全指、中证红利用中证指数公司",
+        lambda: cn_index_daily(), "新浪的中证全指停在 2016、中证红利停在 2019，改用中证指数公司（2005 年起，无成交量）"),
     # ---------------- 8 衍生品
     ("qvix", "中国波指（期权隐含波动率，50ETF／300ETF／1000 等）", "衍生品", "期权论坛",
         lambda: qvix_table(), "数字越大越恐慌；新指数上市前为空；已去掉非交易日与重复列"),
@@ -1152,7 +1196,7 @@ def data_summary(con, max_len=260):
             parts.append("最新：" + "，".join(vals))
         # 空值超過一半的欄位
         nulls = con.execute("select " + ",".join(f'sum("{c}" is null)' for c in cols) + f' from "{t}"').fetchone()
-        sparse = [f"{c}({(k or 0) / n:.0%})" for c, k in zip(cols, nulls) if (k or 0) / n > 0.5]
+        sparse = [f"{c}({(k or 0) / n:.0%})" for c, k in zip(cols, nulls) if (k or 0) / n > 0.5 and c != "首次抓到日"]
         if sparse:
             parts.append("空值過半：" + "、".join(sparse[:4]))
         lines.append((f"摘要 {t}: " + "；".join(parts))[:max_len])
@@ -1184,7 +1228,7 @@ def run_full(con, ds):
 def run_periodic(con, ds):
     sid, name, cat, src, (unit, start, fn, refresh), note = ds
     plist = {"quarter": quarter_ends, "day": trade_days, "year": years, "month": sw_months,
-             "mstart": month_starts}[unit](start)
+             "mstart": month_starts, "quarter+": quarter_ends_cur}[unit](start)
     done = {r[0] for r in con.execute("select period from _progress where id=?", (sid,))}
     recent = set(plist[-refresh:]) if refresh else set()
     todo = [p for p in plist if p not in done or p in recent]
@@ -1219,7 +1263,7 @@ def run_periodic(con, ds):
         time.sleep(0.6)
     left = len([p for p in plist if p not in {r[0] for r in con.execute("select period from _progress where id=?", (sid,))}])
     extra = f"；還有 {left} 期沒抓，下次繼續" if left else ""
-    mark(con, sid, name, cat, src, f"逐{ {'quarter': '季', 'day': '日', 'year': '年', 'month': '月', 'mstart': '月'}[unit] }", note + extra if note else extra.lstrip("；"),
+    mark(con, sid, name, cat, src, f"逐{ {'quarter': '季', 'day': '日', 'year': '年', 'month': '月', 'mstart': '月', 'quarter+': '季'}[unit] }", note + extra if note else extra.lstrip("；"),
          n_fail == 0, err)
     log(f"{'✓' if n_fail == 0 else '△'} {sid} {name}：本次 {n_ok} 期成功、{n_fail} 期失敗{extra}")
     return n_fail == 0

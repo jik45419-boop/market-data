@@ -94,4 +94,15 @@ con.commit()
 line = next(x for x in macro.data_summary(con) if x.startswith("摘要 sm:"))
 assert "3 筆" in line and "2026-11-25～2026-11-26" in line and "2 個品種，最新日有 2 個" in line and "extra(100%)" in line, line
 assert any(x.startswith("摘要 buffett_index:") for x in macro.data_summary(con))
+# 11 當季也要抓：季末日清單含當季；季度查詢窗口
+macro.today = lambda: date(2026, 11, 28)
+qe = macro.quarter_ends_cur("2026-01-01")
+assert qe == ["2026-03-31", "2026-06-30", "2026-09-30", "2026-12-31"], qe
+assert macro.quarter_window("2026-12-31") == ("2026-10-01", "2026-11-28")
+assert macro.quarter_window("2026-09-30") == ("2026-07-01", "2026-09-30")
+macro.today = lambda: date(2026, 12, 31)
+assert macro.quarter_ends_cur("2026-10-01") == ["2026-12-31"]
+# 12 中證指數公司的列：週末、休市日要去掉
+cs = pd.DataFrame({"日期": ["2005-01-01", "2005-01-04", "2018-06-18", "2018-06-19"], "收盘": [1, 2, 3, 4]})
+assert macro.trading_only(cs, "日期", ["2005-01-04", "2018-06-19"])["收盘"].tolist() == [2, 4]
 print("資料品質測試通過")
