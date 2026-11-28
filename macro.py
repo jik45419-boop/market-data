@@ -1117,6 +1117,48 @@ def quality_report(con):
     return out
 
 
+GROUP_COLS = ("品種", "指标", "指数", "基金代码", "利率", "series", "代码")
+
+
+def data_summary(con, max_len=260):
+    """每張資料表一行摘要（筆數、起訖、最新一列的數值、最新日有幾個品種、空值多的欄位），印在執行紀錄裡，
+    讓人不用打開 Drive 上的資料庫，也能核對實際上傳的內容"""
+    lines = []
+    tabs = [r[0] for r in con.execute("select name from sqlite_master where type='table' and name not like '\\_%' escape '\\' order by name")]
+    for t in tabs:
+        cols = [r[1] for r in con.execute(f'pragma table_info("{t}")')]
+        n = con.execute(f'select count(*) from "{t}"').fetchone()[0]
+        if n == 0:
+            lines.append(f"摘要 {t}: 空表")
+            continue
+        pc = "期間" if "期間" in cols else ("_期" if "_期" in cols else None)
+        parts = [f"{n} 筆"]
+        if pc:
+            first, last = con.execute(f'select min("{pc}"), max("{pc}") from "{t}"').fetchone()
+            parts.append(f"{first}～{last}")
+        grp = next((g for g in GROUP_COLS if g in cols), None)
+        if grp and pc:
+            total, at_last = con.execute(f'select count(distinct "{grp}"), '
+                                         f'count(distinct case when "{pc}" = ? then "{grp}" end) from "{t}"', (last,)).fetchone()
+            parts.append(f"{total} 個{grp}，最新日有 {at_last} 個")
+        # 最新一列的數值欄（最多 4 個）
+        order = f'order by "{pc}" desc' if pc else "order by rowid desc"
+        row = con.execute(f'select * from "{t}" {order} limit 1').fetchone()
+        vals = []
+        for c, v in zip(cols, row):
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and c not in (pc, "州数") and len(vals) < 4:
+                vals.append(f"{c}={v:.6g}")
+        if vals:
+            parts.append("最新：" + "，".join(vals))
+        # 空值超過一半的欄位
+        nulls = con.execute("select " + ",".join(f'sum("{c}" is null)' for c in cols) + f' from "{t}"').fetchone()
+        sparse = [f"{c}({(k or 0) / n:.0%})" for c, k in zip(cols, nulls) if (k or 0) / n > 0.5]
+        if sparse:
+            parts.append("空值過半：" + "、".join(sparse[:4]))
+        lines.append((f"摘要 {t}: " + "；".join(parts))[:max_len])
+    return lines
+
+
 def out_of_time():
     return _deadline is not None and time.monotonic() > _deadline
 

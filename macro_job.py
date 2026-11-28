@@ -63,6 +63,10 @@ def main():
     con = macro.open_db(DB)
     for t, issue, n in macro.quality_report(con):
         macro.log(f"品質檢查：{t} {issue} {n} 筆")
+    print("::group::資料摘要（每張表一行）", flush=True)
+    for ln in macro.data_summary(con):
+        print(ln, flush=True)
+    print("::endgroup::", flush=True)
     con.close()
 
     gzip_file(DB, gz)
