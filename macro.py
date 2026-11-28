@@ -643,6 +643,11 @@ def _etf_one(code):
                        "成交额": pd.to_numeric(px.get("amount"), errors="coerce")})
     d = px.merge(nav, on="日期", how="outer").sort_values("日期")
     d["溢价率%"] = ((d["收盘"] / d["单位净值"] - 1) * 100).round(3)
+    # ETF 溢價很少超過 ±15%（2015 股災最深約 −14%）。差距超過 30%＝份額折算日（價格與淨值一邊已折算、一邊還沒）或來源錯誤
+    bad = d["溢价率%"].abs() > 30
+    d["备注"] = ""
+    d.loc[bad, "备注"] = "价格与净值差距过大（份额折算日或来源错误），溢价率不采用"
+    d.loc[bad, "溢价率%"] = None
     return d
 
 
@@ -675,9 +680,14 @@ def etf_flows():
     d["份额变化"] = d.groupby("基金代码")["基金份额"].diff()
     gap = d.groupby("基金代码")["_i"].diff()
     d.loc[gap != 1, "份额变化"] = None          # 前一筆不是前一個交易日（中間有缺）：不算，避免把好幾天的變化算成一天
+    # 份額折算／合併：份額比例 × 淨值比例 ≈ 1 且份額大幅變動（例如 2015-04-14 南方中證 500：份額 ÷3.57、淨值 ×3.57）→ 不是申購贖回
+    sr = d["基金份额"] / d.groupby("基金代码")["基金份额"].shift(1)
+    nr = d["单位净值"] / d.groupby("基金代码")["单位净值"].shift(1)
+    d["份额折算"] = (((sr * nr) - 1).abs() < 0.1) & ((sr > 1.4) | (sr < 0.7)) & (gap == 1)
+    d.loc[d["份额折算"], "份额变化"] = None
     d["估算净申购(亿元)"] = (d["份额变化"] * d["单位净值"] / 1e8).round(3)
     d["基金份额(亿份)"] = (d["基金份额"] / 1e8).round(3)
-    return d[["日期", "基金代码", "品種", "基金份额(亿份)", "单位净值", "估算净申购(亿元)"]]
+    return d[["日期", "基金代码", "品種", "基金份额(亿份)", "单位净值", "估算净申购(亿元)", "份额折算"]]
 
 
 def clean_qvix(d, cal):
@@ -1107,6 +1117,48 @@ def quality_report(con):
     return out
 
 
+GROUP_COLS = ("品種", "指标", "指数", "基金代码", "利率", "series", "代码")
+
+
+def data_summary(con, max_len=260):
+    """每張資料表一行摘要（筆數、起訖、最新一列的數值、最新日有幾個品種、空值多的欄位），印在執行紀錄裡，
+    讓人不用打開 Drive 上的資料庫，也能核對實際上傳的內容"""
+    lines = []
+    tabs = [r[0] for r in con.execute("select name from sqlite_master where type='table' and name not like '\\_%' escape '\\' order by name")]
+    for t in tabs:
+        cols = [r[1] for r in con.execute(f'pragma table_info("{t}")')]
+        n = con.execute(f'select count(*) from "{t}"').fetchone()[0]
+        if n == 0:
+            lines.append(f"摘要 {t}: 空表")
+            continue
+        pc = "期間" if "期間" in cols else ("_期" if "_期" in cols else None)
+        parts = [f"{n} 筆"]
+        if pc:
+            first, last = con.execute(f'select min("{pc}"), max("{pc}") from "{t}"').fetchone()
+            parts.append(f"{first}～{last}")
+        grp = next((g for g in GROUP_COLS if g in cols), None)
+        if grp and pc:
+            total, at_last = con.execute(f'select count(distinct "{grp}"), '
+                                         f'count(distinct case when "{pc}" = ? then "{grp}" end) from "{t}"', (last,)).fetchone()
+            parts.append(f"{total} 個{grp}，最新日有 {at_last} 個")
+        # 最新一列的數值欄（最多 4 個）
+        order = f'order by "{pc}" desc' if pc else "order by rowid desc"
+        row = con.execute(f'select * from "{t}" {order} limit 1').fetchone()
+        vals = []
+        for c, v in zip(cols, row):
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and c not in (pc, "州数") and len(vals) < 4:
+                vals.append(f"{c}={v:.6g}")
+        if vals:
+            parts.append("最新：" + "，".join(vals))
+        # 空值超過一半的欄位
+        nulls = con.execute("select " + ",".join(f'sum("{c}" is null)' for c in cols) + f' from "{t}"').fetchone()
+        sparse = [f"{c}({(k or 0) / n:.0%})" for c, k in zip(cols, nulls) if (k or 0) / n > 0.5]
+        if sparse:
+            parts.append("空值過半：" + "、".join(sparse[:4]))
+        lines.append((f"摘要 {t}: " + "；".join(parts))[:max_len])
+    return lines
+
+
 def out_of_time():
     return _deadline is not None and time.monotonic() > _deadline
 
@@ -1144,7 +1196,10 @@ def run_periodic(con, ds):
         if out_of_time():
             break
         try:
-            df = fn(p)
+            try:
+                df = fn(p)
+            except TypeError:       # akshare 遇到「這一期來源沒有資料」會丟 TypeError（例如 2005～2009 年的解禁），當作空的
+                df = None
             rows = 0 if df is None else len(df)
             if rows:
                 write_period(con, sid, p, df)

@@ -61,4 +61,37 @@ con.execute("create table bad2(期間 text, v real)")
 con.executemany("insert into bad2 values(?,?)", [(None, 1), ("2026-01-01", 2)])
 con.commit()
 assert ("bad2", "期間是空的（日期格式沒認出來）", 1) in macro.quality_report(con)
+# 8 逐期資料：來源沒資料的年份（akshare 丟 TypeError）要當成空的、標成完成，不要永遠重試
+def _src(y):
+    if int(y) < 2010:
+        raise TypeError("no data")
+    return pd.DataFrame({"日期": [f"{y}-06-01"], "v": [1]})
+
+
+ds = ("t_year", "測試", "分類", "來源", ("year", "2008", _src, 1), "")
+macro.run_periodic(con, ds)
+done = {r[0] for r in con.execute("select period from _progress where id='t_year'")}
+assert {"2008", "2009", "2010"} <= done, done
+# 9 ETF：份額折算日不算淨申購；價格與淨值差距過大的溢價率不採用
+macro.trade_days = lambda start: ["2024-11-25", "2024-11-26", "2024-11-27", "2024-11-28", "2024-11-29"]
+c2 = sqlite3.connect(tmp / "etf.db")
+c2.execute("create table etf_shares_sse(统计日期 text, 基金代码 text, 基金份额 real)")
+c2.executemany("insert into etf_shares_sse values(?,?,?)", [("2024-11-25", "510500", 100e8), ("2024-11-26", "510500", 110e8),
+                                                           ("2024-11-27", "510500", 28e8), ("2024-11-28", "510500", 28e8)])
+c2.execute("create table etf_premium(日期 text, 基金代码 text, 品種 text, 单位净值 real)")
+c2.executemany("insert into etf_premium values(?,?,?,?)", [("2024-11-25", "510500", "x", 2.0), ("2024-11-26", "510500", "x", 2.0),
+                                                           ("2024-11-27", "510500", "x", 2.0 * 3.5714), ("2024-11-28", "510500", "x", 2.0 * 3.5714)])
+c2.commit(); c2.close()
+macro.DB = tmp / "etf.db"
+fl = macro.etf_flows().set_index("日期")
+assert fl.loc["2024-11-26", "估算净申购(亿元)"] == 20.0, fl            # 份額 +10 億份 × 淨值 2
+assert pd.isna(fl.loc["2024-11-27", "估算净申购(亿元)"]) and bool(fl.loc["2024-11-27", "份额折算"]), fl   # 折算日
+assert abs(fl.loc["2024-11-28", "估算净申购(亿元)"]) < 1e-6                                              # 折算後正常
+# 10 資料摘要：筆數、起訖、最新數值、品種數、空值過半的欄位
+con.execute("create table sm(期間 text, 品種 text, close real, extra real)")
+con.executemany("insert into sm values(?,?,?,?)", [("2026-11-25", "A", 1.5, None), ("2026-11-26", "A", 2.5, None), ("2026-11-26", "B", 3.5, None)])
+con.commit()
+line = next(x for x in macro.data_summary(con) if x.startswith("摘要 sm:"))
+assert "3 筆" in line and "2026-11-25～2026-11-26" in line and "2 個品種，最新日有 2 個" in line and "extra(100%)" in line, line
+assert any(x.startswith("摘要 buffett_index:") for x in macro.data_summary(con))
 print("資料品質測試通過")
